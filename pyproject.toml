@@ -1,0 +1,31 @@
+[project]
+name = "grafana-migrator"
+version = "0.1.0"
+description = "Export dashboards, folders, alert rules, contact points, and notification policy from a standalone Grafana instance as Grafana Operator custom resources, deduped against the target instance"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+grafana-migrator = "grafana_migrator.cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 120
+skip-string-normalization = true
+
+[tool.ruff]
+line-length = 120
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
