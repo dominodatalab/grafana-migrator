@@ -12,6 +12,10 @@ from typing import Any
 import pytest
 
 from grafana_migrator.import_plan import (
+    POLICY_ABSENT,
+    POLICY_CUSTOM,
+    POLICY_DEFAULT,
+    POLICY_PROVISIONED,
     IncompleteSnapshotError,
     PlanOptions,
     TargetInventory,
@@ -166,11 +170,26 @@ def test_default_source_policy_is_not_migrated():
     assert report.notification_policy_status == "skipped_default"
 
 
-def test_policy_is_not_migrated_when_the_target_already_has_one():
-    inv = TargetInventory(probe_notification_policy=lambda: True)
+def test_policy_is_not_migrated_when_the_target_already_has_a_custom_one():
+    inv = TargetInventory(probe_notification_policy_state=lambda: POLICY_CUSTOM)
     plan, report = _plan(inv)
     assert plan.notification_policy is None
     assert report.notification_policy_status == "skipped_target_has_policy"
+
+
+def test_policy_is_migrated_when_the_target_tree_is_still_the_factory_default():
+    inv = TargetInventory(probe_notification_policy_state=lambda: POLICY_DEFAULT)
+    plan, report = _plan(inv)
+    assert plan.notification_policy is not None
+
+
+def test_provisioned_target_policy_is_reported_distinctly_from_merely_custom():
+    # A provisioned tree would reject the write or revert it, which is a
+    # different remedy than "merge it yourself".
+    inv = TargetInventory(probe_notification_policy_state=lambda: POLICY_PROVISIONED)
+    plan, report = _plan(inv)
+    assert plan.notification_policy is None
+    assert report.notification_policy_status == "skipped_target_policy_provisioned"
 
 
 def test_policy_probe_is_not_called_when_the_source_policy_is_default():
@@ -179,10 +198,10 @@ def test_policy_probe_is_not_called_when_the_source_policy_is_default():
 
     def probe():
         calls.append(1)
-        return False
+        return POLICY_ABSENT
 
     dump = _dump(notification_policy_raw={"receiver": "empty"})
-    plan_import(dump, TargetInventory(probe_notification_policy=probe), PlanOptions(), MigrationReport())
+    plan_import(dump, TargetInventory(probe_notification_policy_state=probe), PlanOptions(), MigrationReport())
     assert calls == []
 
 

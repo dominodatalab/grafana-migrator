@@ -71,6 +71,7 @@ module = [
     "test_cli",
     "test_dedup",
     "test_grafana_client",
+    "test_grafana_inventory",
     "test_import_plan",
     "test_naming",
     "test_report",

@@ -36,6 +36,18 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_POLICY_RECEIVER = "empty"
 
+# What the target's notification policy currently is. Pushing is only safe for
+# the first two: the tree is a single object, so writing it replaces whatever
+# is there wholesale.
+POLICY_ABSENT = "absent"
+POLICY_DEFAULT = "default"
+POLICY_CUSTOM = "custom"
+POLICY_PROVISIONED = "provisioned"
+
+
+def _no_existing_policy() -> str:
+    return POLICY_ABSENT
+
 
 class IncompleteSnapshotError(RuntimeError):
     """search.json lists a dashboard the snapshot has no payload file for."""
@@ -73,17 +85,17 @@ class PlanOptions:
 class TargetInventory:
     """What already exists on the target, in backend-neutral form.
 
-    `probe_notification_policy` is a callable rather than a value on purpose:
-    answering it costs a request, and the planner only needs it when the source
-    policy is non-default, so making it eager would add a call the kubectl path
-    does not make today.
+    `probe_notification_policy_state` is a callable rather than a value on
+    purpose: answering it costs a request, and the planner only needs it when
+    the source policy is non-default, so making it eager would add a call the
+    kubectl path does not make today. It returns one of the POLICY_* constants.
     """
 
     dashboards: list[ExistingDashboard] = field(default_factory=list)
     folders: list[ExistingFolder] = field(default_factory=list)
     alert_rule_groups: list[ExistingAlertRuleGroup] = field(default_factory=list)
     contact_points: list[ExistingContactPoint] = field(default_factory=list)
-    probe_notification_policy: Callable[[], bool] = bool
+    probe_notification_policy_state: Callable[[], str] = _no_existing_policy
 
 
 @dataclass(frozen=True)
@@ -256,12 +268,31 @@ def _plan_notification_policy(
         report.notification_policy_status = "skipped_default"
         report.notification_policy_detail = "source policy is Grafana's untouched default -- nothing to migrate"
         return
-    if inventory.probe_notification_policy():
-        report.notification_policy_status = "skipped_target_has_policy"
+    state = inventory.probe_notification_policy_state()
+    if state == POLICY_PROVISIONED:
+        report.notification_policy_status = "skipped_target_policy_provisioned"
         report.notification_policy_detail = (
-            "target namespace already has a GrafanaNotificationPolicy CR -- it represents the whole "
-            "routing tree, so this tool will not risk clobbering it; merge manually if the source "
-            "policy has routing worth carrying over"
+            "target's notification policy is provisioned (managed by an operator or a provisioning "
+            "file), so writing it would either be rejected or immediately reverted; change it at the "
+            "source that manages it instead"
+        )
+        return
+    if state not in (POLICY_ABSENT, POLICY_DEFAULT):
+        report.notification_policy_status = "skipped_target_has_policy"
+        # Names a concrete object, so it has to say which kind -- the whole
+        # point of the status being backend-neutral is that the wording is not.
+        report.notification_policy_detail = (
+            (
+                "target namespace already has a GrafanaNotificationPolicy CR -- it represents the whole "
+                "routing tree, so this tool will not risk clobbering it; merge manually if the source "
+                "policy has routing worth carrying over"
+            )
+            if report.backend == "operator"
+            else (
+                "target Grafana already has a non-default notification policy -- it is a single tree, "
+                "so writing it would replace what is there; merge manually if the source policy has "
+                "routing worth carrying over"
+            )
         )
         return
     plan.notification_policy = policy

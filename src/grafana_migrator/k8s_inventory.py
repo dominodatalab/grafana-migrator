@@ -12,7 +12,7 @@ import logging
 import subprocess
 from typing import Any, Optional
 
-from .import_plan import TargetInventory
+from .import_plan import POLICY_ABSENT, POLICY_CUSTOM, TargetInventory
 from .models import ExistingAlertRuleGroup, ExistingContactPoint, ExistingDashboard, ExistingFolder
 
 logger = logging.getLogger(__name__)
@@ -157,5 +157,9 @@ def build_target_inventory(
         folders=folders,
         alert_rule_groups=rule_groups,
         contact_points=contact_points,
-        probe_notification_policy=lambda: has_existing_notification_policy(namespace, context),
+        # kubectl can only see whether a CR exists, not whether the tree it
+        # describes is Grafana's default -- existence alone is the guardrail.
+        probe_notification_policy_state=lambda: (
+            POLICY_CUSTOM if has_existing_notification_policy(namespace, context) else POLICY_ABSENT
+        ),
     )
