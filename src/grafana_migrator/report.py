@@ -4,27 +4,28 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
 class MigrationReport:
-    migrated: list[dict] = field(default_factory=list)
-    skipped_uid_match: list[dict] = field(default_factory=list)
-    skipped_title_match: list[dict] = field(default_factory=list)
-    folders_created: list[dict] = field(default_factory=list)
-    folders_reused: list[dict] = field(default_factory=list)
+    migrated: list[dict[str, Any]] = field(default_factory=list)
+    skipped_uid_match: list[dict[str, Any]] = field(default_factory=list)
+    skipped_title_match: list[dict[str, Any]] = field(default_factory=list)
+    folders_created: list[dict[str, Any]] = field(default_factory=list)
+    folders_reused: list[dict[str, Any]] = field(default_factory=list)
 
-    alert_rules_migrated: list[dict] = field(default_factory=list)
-    alert_rules_skipped_uid_match: list[dict] = field(default_factory=list)
+    alert_rules_migrated: list[dict[str, Any]] = field(default_factory=list)
+    alert_rules_skipped_uid_match: list[dict[str, Any]] = field(default_factory=list)
 
-    contact_points_migrated: list[dict] = field(default_factory=list)
-    contact_points_skipped_name_match: list[dict] = field(default_factory=list)
-    contact_points_skipped_default: list[dict] = field(default_factory=list)
+    contact_points_migrated: list[dict[str, Any]] = field(default_factory=list)
+    contact_points_skipped_name_match: list[dict[str, Any]] = field(default_factory=list)
+    contact_points_skipped_default: list[dict[str, Any]] = field(default_factory=list)
 
     notification_policy_status: str = "not_attempted"  # migrated | skipped_default | skipped_target_has_policy
     notification_policy_detail: str = ""
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "summary": {
                 "dashboards_discovered": (

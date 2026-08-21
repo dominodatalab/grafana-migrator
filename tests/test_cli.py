@@ -1,3 +1,4 @@
+from typing import Any
 from pathlib import Path
 
 from grafana_migrator import cli
@@ -106,7 +107,7 @@ def test_parse_contact_point_merges_secure_fields_map_and_inline_sentinel():
 def test_manifest_subdirs_excludes_report_json():
     # report.json lives directly under --output-dir, not in a subdirectory --
     # it must never end up in the set of dirs handed to `kubectl apply`.
-    manifests = [
+    manifests: list[tuple[str, dict[str, Any]]] = [
         ("dashboards/migrated-a.yaml", {}),
         ("folders/migrated-b.yaml", {}),
         ("alert-rules/migrated-c.yaml", {}),
@@ -119,7 +120,7 @@ def test_manifest_subdirs_empty_when_nothing_written():
 
 
 def test_manifest_subdirs_dedupes_multiple_files_per_directory():
-    manifests = [
+    manifests: list[tuple[str, dict[str, Any]]] = [
         ("contact-points/migrated-a.yaml", {}),
         ("contact-points/migrated-a-secrets.yaml", {}),
     ]
@@ -146,25 +147,35 @@ def test_existing_manifest_subdirs_on_nonexistent_dir_returns_empty():
     assert _existing_manifest_subdirs(Path("/no/such/directory/anywhere")) == []
 
 
+def _recorder(calls, label=None):
+    """Stand-in for a run_* entry point: record the argv it saw, exit 0."""
+
+    def run(argv):
+        calls.append((label, argv) if label else argv)
+        return 0
+
+    return run
+
+
 def test_run_dispatches_apply_subcommand(monkeypatch):
-    calls = []
-    monkeypatch.setattr(cli, "run_apply", lambda argv: calls.append(("apply", argv)) or 0)
-    monkeypatch.setattr(cli, "run_export", lambda argv: calls.append(("export", argv)) or 0)
-    monkeypatch.setattr(cli, "run_import", lambda argv: calls.append(("import", argv)) or 0)
+    calls: list[Any] = []
+    monkeypatch.setattr(cli, "run_apply", _recorder(calls, "apply"))
+    monkeypatch.setattr(cli, "run_export", _recorder(calls, "export"))
+    monkeypatch.setattr(cli, "run_import", _recorder(calls, "import"))
     cli.run(["apply", "./some-import-dir", "--kube-context", "my-ctx"])
     assert calls == [("apply", ["./some-import-dir", "--kube-context", "my-ctx"])]
 
 
 def test_run_dispatches_export_subcommand(monkeypatch):
-    calls = []
-    monkeypatch.setattr(cli, "run_export", lambda argv: calls.append(argv) or 0)
+    calls: list[Any] = []
+    monkeypatch.setattr(cli, "run_export", _recorder(calls))
     cli.run(["export", "--source-url", "http://localhost:18090"])
     assert calls == [["--source-url", "http://localhost:18090"]]
 
 
 def test_run_dispatches_import_subcommand(monkeypatch):
-    calls = []
-    monkeypatch.setattr(cli, "run_import", lambda argv: calls.append(argv) or 0)
+    calls: list[Any] = []
+    monkeypatch.setattr(cli, "run_import", _recorder(calls))
     cli.run(["import", "./some-snapshot-dir", "--namespace", "monitoring"])
     assert calls == [["./some-snapshot-dir", "--namespace", "monitoring"]]
 

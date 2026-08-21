@@ -1,3 +1,4 @@
+from typing import Any
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,7 @@ DASHBOARD_PAYLOAD = {"dashboard": {"uid": "dash-1", "title": "CPU Overview", "pa
 
 
 def _sample_dump(**overrides) -> SourceDump:
-    fields = dict(
+    fields: dict[str, Any] = dict(
         search_results=SEARCH_RESULTS,
         dashboards_by_uid={"dash-1": DASHBOARD_PAYLOAD},
         alert_rules_raw=[{"uid": "rule-1"}],

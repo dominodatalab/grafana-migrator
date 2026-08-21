@@ -45,8 +45,10 @@ def test_dashboard_with_no_title_or_uid_recorded_never_matches():
 
 def test_folder_index_matches_by_normalized_title():
     index = FolderIndex([ExistingFolder(cr_name="team-managed", namespace="ns", title="Team Managed")])
-    assert index.find("team managed").cr_name == "team-managed"
-    assert index.find("  Team   Managed ").cr_name == "team-managed"
+    for probe in ("team managed", "  Team   Managed "):
+        match = index.find(probe)
+        assert match is not None
+        assert match.cr_name == "team-managed"
 
 
 def test_folder_index_returns_none_for_unknown_title():

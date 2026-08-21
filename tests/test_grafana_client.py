@@ -1,5 +1,8 @@
 import pytest
 import requests
+from requests.adapters import HTTPAdapter
+from typing import cast
+
 from fake_session import FakeResponse, FakeSession
 
 from grafana_migrator.grafana_client import (
@@ -93,7 +96,9 @@ def test_grafana_client_appends_path_segment_when_given():
 
 
 def _client(routes, **kw):
-    return GrafanaClient("http://graf.test", token="glsa_faketoken", session=FakeSession(routes), **kw)
+    # FakeSession is a duck-typed double, not a requests.Session subclass.
+    session = cast(requests.Session, FakeSession(routes))
+    return GrafanaClient("http://graf.test", token="glsa_faketoken", session=session, **kw)
 
 
 def test_get_still_routes_through_request_and_returns_parsed_json():
@@ -137,7 +142,7 @@ def test_error_carries_status_and_body_for_reporting():
     with pytest.raises(GrafanaBadRequestError) as excinfo:
         client.search()
     assert excinfo.value.status == 400
-    assert "bad uid" in excinfo.value.body
+    assert "bad uid" in (excinfo.value.body or "")
     assert excinfo.value.method == "GET"
 
 
@@ -181,7 +186,10 @@ def test_post_is_excluded_from_the_retry_allowlist():
     # urllib3 cannot tell a POST the server never saw from one it processed
     # before the 503, so retrying a create would duplicate objects.
     client = GrafanaClient("http://graf.test", token="t")
-    allowed = client.session.get_adapter("http://graf.test").max_retries.allowed_methods
+    adapter = client.session.get_adapter("http://graf.test")
+    assert isinstance(adapter, HTTPAdapter)
+    allowed = adapter.max_retries.allowed_methods
+    assert allowed is not None
     assert "GET" in allowed
     assert "PUT" in allowed
     assert "POST" not in allowed
@@ -191,7 +199,7 @@ def test_default_headers_are_sent_on_every_request():
     client = GrafanaClient(
         "http://graf.test",
         token="t",
-        session=FakeSession({("GET", "/api/search"): FakeResponse(200, [])}),
+        session=cast(requests.Session, FakeSession({("GET", "/api/search"): FakeResponse(200, [])})),
         default_headers={"X-Disable-Provenance": "true"},
     )
     assert client.session.headers["X-Disable-Provenance"] == "true"

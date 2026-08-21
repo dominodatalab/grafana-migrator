@@ -9,7 +9,7 @@ name `--source-token` or `--dest-token`.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any, Optional, cast
 from urllib.parse import urlsplit, urlunsplit
 
 import requests
@@ -238,15 +238,15 @@ class GrafanaClient:
 
     def search(self, limit: int = 5000) -> list[dict[str, Any]]:
         """Return every folder + dashboard row from /api/search."""
-        return self._get("/api/search", limit=limit)
+        return cast(list[dict[str, Any]], self._get("/api/search", limit=limit))
 
     def get_dashboard(self, uid: str) -> dict[str, Any]:
         """Return the full {"dashboard": ..., "meta": ...} payload for a uid."""
-        return self._get(f"/api/dashboards/uid/{uid}")
+        return cast(dict[str, Any], self._get(f"/api/dashboards/uid/{uid}"))
 
     def list_alert_rules(self) -> list[dict[str, Any]]:
         """Return every provisioned alert rule (Grafana-managed unified alerting only)."""
-        return self._get("/api/v1/provisioning/alert-rules")
+        return cast(list[dict[str, Any]], self._get("/api/v1/provisioning/alert-rules"))
 
     def list_contact_points(self) -> list[dict[str, Any]]:
         """Return every provisioned contact point.
@@ -254,11 +254,11 @@ class GrafanaClient:
         Secure settings are redacted by Grafana itself; the response only
         marks which field names are set, via each receiver's `secureFields`.
         """
-        return self._get("/api/v1/provisioning/contact-points")
+        return cast(list[dict[str, Any]], self._get("/api/v1/provisioning/contact-points"))
 
     def get_notification_policy_tree(self) -> dict[str, Any]:
         """Return the single root alertmanager route tree for this org."""
-        return self._get("/api/v1/provisioning/policies")
+        return cast(dict[str, Any], self._get("/api/v1/provisioning/policies"))
 
 
 def build_client(

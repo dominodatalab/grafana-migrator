@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
-from typing import Optional
+from typing import Any, Optional
 
 from .models import ExistingAlertRuleGroup, ExistingContactPoint, ExistingDashboard, ExistingFolder
 
@@ -27,7 +27,7 @@ class KubectlError(RuntimeError):
     """Raised when `kubectl` itself fails (not found, bad context, RBAC, etc.)."""
 
 
-def _kubectl_get_json(resource: str, namespace: str, context: Optional[str]) -> dict:
+def _kubectl_get_json(resource: str, namespace: str, context: Optional[str]) -> dict[str, Any]:
     cmd = ["kubectl", "get", resource, "-n", namespace, "-o", "json"]
     if context:
         cmd += ["--context", context]
@@ -41,9 +41,10 @@ def _kubectl_get_json(resource: str, namespace: str, context: Optional[str]) -> 
     if proc.returncode != 0:
         raise KubectlError(f"kubectl get {resource} -n {namespace} failed: {proc.stderr.strip()}")
     try:
-        return json.loads(proc.stdout)
+        parsed: dict[str, Any] = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
         raise KubectlError(f"kubectl get {resource} returned non-JSON output: {exc}") from exc
+    return parsed
 
 
 def list_existing_dashboards(namespace: str, context: Optional[str] = None) -> list[ExistingDashboard]:

@@ -20,7 +20,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from .dedup import AlertRuleIndex, ContactPointIndex, DashboardIndex, FolderIndex
 from .grafana_client import GrafanaClientError, build_client
@@ -65,7 +65,7 @@ def parse_selector(raw: str) -> dict[str, str]:
     return result
 
 
-def _parse_alert_rule(raw: dict) -> SourceAlertRule:
+def _parse_alert_rule(raw: dict[str, Any]) -> SourceAlertRule:
     """Parse one entry from GET /api/v1/provisioning/alert-rules.
 
     notification_settings/keep_firing_for are snake_case unlike the rest of
@@ -101,7 +101,7 @@ def _parse_alert_rule(raw: dict) -> SourceAlertRule:
 _REDACTED_SENTINEL = "[REDACTED]"
 
 
-def _parse_contact_point(raw: dict) -> SourceContactPoint:
+def _parse_contact_point(raw: dict[str, Any]) -> SourceContactPoint:
     """Parse one entry from GET /api/v1/provisioning/contact-points.
 
     Secure fields are marked either via a `secureFields` map or an inline
@@ -125,7 +125,7 @@ def _parse_contact_point(raw: dict) -> SourceContactPoint:
     )
 
 
-def _manifest_subdirs(manifests: list[tuple[str, dict]]) -> list[str]:
+def _manifest_subdirs(manifests: list[tuple[str, dict[str, Any]]]) -> list[str]:
     """Top-level subdirectory names actually written under --output-dir.
 
     Scopes `kubectl apply` to the manifest subdirs, excluding report.json.
@@ -364,7 +364,7 @@ def run_import(argv: list[str] | None = None) -> int:
     ]
 
     report = MigrationReport()
-    manifests: list[tuple[str, dict]] = []
+    manifests: list[tuple[str, dict[str, Any]]] = []
     folder_ref_by_source_uid: dict[str, str] = {}
 
     for f in source_folders:
@@ -441,7 +441,7 @@ def run_import(argv: list[str] | None = None) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 1
 
-        source_rules = [_parse_alert_rule(r) for r in dump.alert_rules_raw]
+        source_rules = [_parse_alert_rule(r) for r in (dump.alert_rules_raw or [])]
         source_contact_points = [_parse_contact_point(c) for c in (dump.contact_points_raw or [])]
 
         logger.info(
@@ -553,7 +553,7 @@ def run_import(argv: list[str] | None = None) -> int:
                 else "the source snapshot has no notification-policy.json (not fetched at export time)"
             )
         else:
-            policy = SourceNotificationPolicy(route=dump.notification_policy_raw)
+            policy = SourceNotificationPolicy(route=dump.notification_policy_raw or {})
             if is_default_notification_policy(policy):
                 report.notification_policy_status = "skipped_default"
                 report.notification_policy_detail = "source policy is Grafana's untouched default -- nothing to migrate"
