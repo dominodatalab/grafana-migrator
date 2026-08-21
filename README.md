@@ -12,7 +12,7 @@ credentials or reachability at the same time.
 
 ## Prerequisites
 
-- Python 3.10+.
+- Python 3.12+.
 - `kubectl` on `PATH`, pointed at the target cluster, with **grafana-operator
   already installed** there and a `Grafana` custom resource already present
   in the namespace you're migrating into.
@@ -41,6 +41,21 @@ pip install -e .
 
 This registers the `grafana-migrator` command for as long as the venv is
 active. Run `grafana-migrator --help` to confirm it worked.
+
+## Development
+
+```bash
+pip install -e '.[dev]'   # adds black, ruff, mypy, pytest
+pytest -q
+ruff check src tests
+black --check src tests
+mypy
+```
+
+`black` is pinned to an exact version on purpose -- its stable style shifts
+between majors, so an unpinned formatter turns every upgrade into a
+reformat-the-world diff. All four checks run in CI against Python 3.12 (the
+declared floor) and 3.13.
 
 ## Quick start
 

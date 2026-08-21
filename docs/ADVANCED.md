@@ -109,7 +109,7 @@ dedup; never touches the source Grafana instance.
 
 ### Runtime
 
-- Python 3.10 or later.
+- Python 3.12 or later.
 - `requests>=2.31` and `pyyaml>=6.0` (installed automatically, see
   `pyproject.toml`).
 - `kubectl` on `PATH` -- **only needed for `import` and `apply`**, not for
