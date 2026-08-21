@@ -73,6 +73,7 @@ module = [
     "test_grafana_client",
     "test_import_plan",
     "test_naming",
+    "test_report",
     "test_run_import",
     "test_source_dump",
     "test_transform",

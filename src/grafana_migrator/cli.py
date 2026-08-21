@@ -255,7 +255,7 @@ def run_import(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    report = MigrationReport()
+    report = MigrationReport(backend="operator")
     opts = PlanOptions(
         include_title_duplicates=args.include_title_duplicates,
         skip_alerts=args.skip_alerts,

@@ -1,4 +1,12 @@
-"""Aggregate and render a summary of what the exporter did and why."""
+"""Aggregate and render a summary of what an import did and why.
+
+One report type serves both backends. Per-item entries carry a neutral
+`target_ref` / `matched_ref` -- the CR name in operator mode, the Grafana uid
+in api mode -- so the renderer does not have to know which backend ran.
+Operator mode also keeps writing the original `cr_name` / `matched_cr_name`
+keys, since report.json is a documented artifact that docs/ADVANCED.md names
+by key and there are reports on disk from earlier runs.
+"""
 
 from __future__ import annotations
 
@@ -7,8 +15,20 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+def _ref(entry: dict[str, Any]) -> Any:
+    """The thing this entry landed as on the target, whichever backend wrote it."""
+    return entry.get("target_ref") or entry.get("cr_name")
+
+
+def _matched(entry: dict[str, Any]) -> Any:
+    """The pre-existing target object this entry was deduped against."""
+    return entry.get("matched_ref") or entry.get("matched_cr_name")
+
+
 @dataclass
 class MigrationReport:
+    backend: str = "operator"  # operator | api
+
     migrated: list[dict[str, Any]] = field(default_factory=list)
     skipped_uid_match: list[dict[str, Any]] = field(default_factory=list)
     skipped_title_match: list[dict[str, Any]] = field(default_factory=list)
@@ -22,12 +42,20 @@ class MigrationReport:
     contact_points_skipped_name_match: list[dict[str, Any]] = field(default_factory=list)
     contact_points_skipped_default: list[dict[str, Any]] = field(default_factory=list)
 
-    notification_policy_status: str = "not_attempted"  # migrated | skipped_default | skipped_target_has_policy
+    # not_attempted | migrated | skipped_by_flag | skipped_unavailable | skipped_default
+    # | skipped_target_has_policy | skipped_target_policy_provisioned | failed
+    notification_policy_status: str = "not_attempted"
     notification_policy_detail: str = ""
+
+    # api mode only: a write that failed, and anything the run wants to warn
+    # about without failing (e.g. a secure field with no supplied value).
+    failures: list[dict[str, Any]] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "summary": {
+                "backend": self.backend,
                 "dashboards_discovered": (
                     len(self.migrated) + len(self.skipped_uid_match) + len(self.skipped_title_match)
                 ),
@@ -43,6 +71,8 @@ class MigrationReport:
                 "contact_points_skipped_name_match": len(self.contact_points_skipped_name_match),
                 "contact_points_skipped_default": len(self.contact_points_skipped_default),
                 "notification_policy_status": self.notification_policy_status,
+                "failures": len(self.failures),
+                "warnings": len(self.warnings),
             },
             "migrated": self.migrated,
             "skipped_uid_match": self.skipped_uid_match,
@@ -56,6 +86,8 @@ class MigrationReport:
             "contact_points_skipped_default": self.contact_points_skipped_default,
             "notification_policy_status": self.notification_policy_status,
             "notification_policy_detail": self.notification_policy_detail,
+            "failures": self.failures,
+            "warnings": self.warnings,
         }
 
     def to_json(self) -> str:
@@ -66,8 +98,9 @@ class MigrationReport:
         lines = [
             "grafana-migrator report",
             "================================",
+            f"  backend                         : {s['backend']}",
             f"  dashboards discovered on source : {s['dashboards_discovered']}",
-            f"  migrated (new manifests written): {s['dashboards_migrated']}",
+            f"  migrated                        : {s['dashboards_migrated']}",
             f"  skipped (uid already on target) : {s['dashboards_skipped_uid_match']}",
             f"  skipped (title collision only)  : {s['dashboards_skipped_title_match']}",
             f"  folders created                 : {s['folders_created']}",
@@ -84,20 +117,32 @@ class MigrationReport:
         if self.migrated:
             lines.append("\nMigrated dashboards:")
             for m in self.migrated:
-                lines.append(f"  - {m['title']!r} (uid={m['uid']}) -> {m['cr_name']}")
+                lines.append(f"  - {m['title']!r} (uid={m['uid']}) -> {_ref(m)}")
         if self.skipped_title_match:
             lines.append("\nTitle-collision skips (review manually if unexpected):")
             for m in self.skipped_title_match:
-                lines.append(f"  - {m['title']!r} (uid={m['uid']}) matches {m['matched_cr_name']}")
+                lines.append(f"  - {m['title']!r} (uid={m['uid']}) matches {_matched(m)}")
         if self.alert_rules_migrated:
             lines.append("\nMigrated alert rules:")
             for m in self.alert_rules_migrated:
-                lines.append(f"  - {m['title']!r} (uid={m['uid']}, group={m['rule_group']!r}) -> {m['cr_name']}")
+                lines.append(f"  - {m['title']!r} (uid={m['uid']}, group={m['rule_group']!r}) -> {_ref(m)}")
         if self.contact_points_migrated:
             lines.append("\nMigrated contact points (secrets need populating -- see report detail):")
             for m in self.contact_points_migrated:
                 secret_note = f", secret={m['secret_name']!r}" if m.get("secure_field_names") else ""
-                lines.append(f"  - {m['name']!r} (type={m['type']}) -> {m['cr_name']}{secret_note}")
+                lines.append(f"  - {m['name']!r} (type={m['type']}) -> {_ref(m)}{secret_note}")
         if self.notification_policy_detail:
             lines.append(f"\nNotification policy: {self.notification_policy_detail}")
+        if self.warnings:
+            lines.append("\nWarnings:")
+            for w in self.warnings:
+                lines.append(f"  - {w}")
+        if self.failures:
+            lines.append("\nFailures:")
+            for f_ in self.failures:
+                identity = f_.get("identity") or {}
+                label = identity.get("name") or identity.get("title") or identity.get("uid") or "?"
+                status = f_.get("status")
+                status_note = f" [{status}]" if status else ""
+                lines.append(f"  - {f_.get('kind', '?')} {label!r}{status_note}: {f_.get('error', '')}")
         return "\n".join(lines)

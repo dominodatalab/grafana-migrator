@@ -70,7 +70,7 @@ def emit_manifests(
     folder_ref_by_source_uid: dict[str, str] = {}
     for f, existing in plan.folders_existing:
         folder_ref_by_source_uid[f.uid] = existing.cr_name
-        report.folders_reused.append({"title": f.title, "cr_name": existing.cr_name})
+        report.folders_reused.append({"title": f.title, "cr_name": existing.cr_name, "target_ref": existing.cr_name})
     for f in plan.folders_new:
         cr_name = folder_cr_name(f.title)
         folder_ref_by_source_uid[f.uid] = cr_name
@@ -86,7 +86,7 @@ def emit_manifests(
                 ),
             )
         )
-        report.folders_created.append({"title": f.title, "cr_name": cr_name})
+        report.folders_created.append({"title": f.title, "cr_name": cr_name, "target_ref": cr_name})
 
     for d, full in plan.dashboards_new:
         cr_name = dashboard_cr_name(d.uid)
@@ -106,7 +106,7 @@ def emit_manifests(
                 ),
             )
         )
-        report.migrated.append({"uid": d.uid, "title": d.title, "cr_name": cr_name})
+        report.migrated.append({"uid": d.uid, "title": d.title, "cr_name": cr_name, "target_ref": cr_name})
 
     for unit in plan.rule_groups_new:
         cr_name = alert_rule_group_cr_name(unit.folder_title, unit.rule_group)
@@ -127,7 +127,13 @@ def emit_manifests(
         )
         for rule in unit.rules:
             report.alert_rules_migrated.append(
-                {"uid": rule.uid, "title": rule.title, "rule_group": unit.rule_group, "cr_name": cr_name}
+                {
+                    "uid": rule.uid,
+                    "title": rule.title,
+                    "rule_group": unit.rule_group,
+                    "cr_name": cr_name,
+                    "target_ref": cr_name,
+                }
             )
 
     for cp in plan.contact_points_new:
@@ -158,6 +164,7 @@ def emit_manifests(
                 "name": cp.name,
                 "type": cp.type,
                 "cr_name": cr_name,
+                "target_ref": cr_name,
                 "secret_name": secret_name if cp.secure_field_names else None,
                 "secure_field_names": list(cp.secure_field_names),
             }

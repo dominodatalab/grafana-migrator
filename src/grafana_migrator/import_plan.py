@@ -153,12 +153,22 @@ def plan_import(
         decision = dash_index.decide(d.uid, d.title, include_title_duplicates=opts.include_title_duplicates)
         if decision.action == "skip_uid_match":
             report.skipped_uid_match.append(
-                {"uid": d.uid, "title": d.title, "matched_cr_name": decision.matched_cr_name}
+                {
+                    "uid": d.uid,
+                    "title": d.title,
+                    "matched_cr_name": decision.matched_cr_name,
+                    "matched_ref": decision.matched_cr_name,
+                }
             )
             continue
         if decision.action == "skip_title_match":
             report.skipped_title_match.append(
-                {"uid": d.uid, "title": d.title, "matched_cr_name": decision.matched_cr_name}
+                {
+                    "uid": d.uid,
+                    "title": d.title,
+                    "matched_cr_name": decision.matched_cr_name,
+                    "matched_ref": decision.matched_cr_name,
+                }
             )
             continue
 
@@ -181,7 +191,12 @@ def plan_import(
         decision = rule_index.decide(rule.uid, rule.title)
         if decision.action == "skip_uid_match":
             report.alert_rules_skipped_uid_match.append(
-                {"uid": rule.uid, "title": rule.title, "matched_cr_name": decision.matched_cr_name}
+                {
+                    "uid": rule.uid,
+                    "title": rule.title,
+                    "matched_cr_name": decision.matched_cr_name,
+                    "matched_ref": decision.matched_cr_name,
+                }
             )
             continue
         units.setdefault((rule.folder_uid, rule.rule_group), []).append(rule)
@@ -204,7 +219,12 @@ def plan_import(
         decision = contact_point_index.decide(cp.name)
         if decision.action == "skip_name_match":
             report.contact_points_skipped_name_match.append(
-                {"uid": cp.uid, "name": cp.name, "matched_cr_name": decision.matched_cr_name}
+                {
+                    "uid": cp.uid,
+                    "name": cp.name,
+                    "matched_cr_name": decision.matched_cr_name,
+                    "matched_ref": decision.matched_cr_name,
+                }
             )
             continue
         plan.contact_points_new.append(cp)
