@@ -34,11 +34,17 @@ class ExistingDashboard:
 
 @dataclass(frozen=True)
 class ExistingFolder:
-    """A GrafanaFolder CR already on the target cluster."""
+    """A folder that already exists on the target.
+
+    `cr_name` is the opaque identifier of that folder on the target: the
+    GrafanaFolder CR name in operator mode. `uid` is Grafana's own folder uid,
+    which only the HTTP path can see -- the CR does not carry it.
+    """
 
     cr_name: str
     namespace: str
     title: str
+    uid: Optional[str] = None
 
 
 @dataclass(frozen=True)

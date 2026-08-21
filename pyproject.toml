@@ -37,6 +37,9 @@ grafana_migrator = ["py.typed"]
 [tool.black]
 line-length = 120
 skip-string-normalization = true
+# Pin the target so black does not infer py314 and then refuse its own AST
+# safety check when run on an older interpreter.
+target-version = ["py312"]
 
 [tool.ruff]
 line-length = 120
@@ -68,6 +71,7 @@ module = [
     "test_cli",
     "test_dedup",
     "test_grafana_client",
+    "test_import_plan",
     "test_naming",
     "test_run_import",
     "test_source_dump",

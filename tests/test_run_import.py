@@ -11,7 +11,7 @@ import json
 
 import yaml
 
-from grafana_migrator import cli
+from grafana_migrator import cli, k8s_inventory
 from grafana_migrator.source_dump import SourceDump, write_source_dump
 
 SEARCH_RESULTS = [
@@ -64,12 +64,23 @@ def _write_dump(tmp_path):
     return export_dir
 
 
+def _mock_target(monkeypatch, inventory=None):
+    """Stub the single kubectl entry point, keyed by CRD name.
+
+    Patching here rather than at the list_existing_* helpers keeps these tests
+    pinned to a seam that survives refactoring, and exercises the CR-parsing
+    those helpers do instead of bypassing it.
+    """
+    items = inventory or {}
+    monkeypatch.setattr(
+        k8s_inventory,
+        "_kubectl_get_json",
+        lambda resource, namespace, context: {"items": items.get(resource, [])},
+    )
+
+
 def _mock_empty_target(monkeypatch):
-    monkeypatch.setattr(cli, "list_existing_dashboards", lambda namespace, context: [])
-    monkeypatch.setattr(cli, "list_existing_folders", lambda namespace, context: [])
-    monkeypatch.setattr(cli, "list_existing_alert_rule_groups", lambda namespace, context: [])
-    monkeypatch.setattr(cli, "list_existing_contact_points", lambda namespace, context: [])
-    monkeypatch.setattr(cli, "has_existing_notification_policy", lambda namespace, context: False)
+    _mock_target(monkeypatch)
 
 
 def test_import_dry_run_writes_nothing_but_reports_everything_as_new(tmp_path, monkeypatch, capsys):
@@ -164,16 +175,17 @@ def test_import_skip_alerts_flag_ignores_snapshot_alert_data(tmp_path, monkeypat
 
 
 def test_import_treats_uid_already_on_target_as_skipped_not_migrated(tmp_path, monkeypatch):
-    from grafana_migrator.models import ExistingDashboard
-
     export_dir = _write_dump(tmp_path)
-    _mock_empty_target(monkeypatch)
-    monkeypatch.setattr(
-        cli,
-        "list_existing_dashboards",
-        lambda namespace, context: [
-            ExistingDashboard(cr_name="migrated-dash-1", namespace=namespace, uid="dash-1", title="CPU Overview")
-        ],
+    _mock_target(
+        monkeypatch,
+        {
+            "grafanadashboards.grafana.integreatly.org": [
+                {
+                    "metadata": {"name": "migrated-dash-1"},
+                    "spec": {"json": json.dumps({"uid": "dash-1", "title": "CPU Overview"})},
+                }
+            ]
+        },
     )
 
     rc = cli.run_import(

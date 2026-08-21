@@ -3,7 +3,14 @@ from typing import Any
 
 import pytest
 
-from grafana_migrator.source_dump import SourceDump, SourceDumpError, read_source_dump, write_source_dump
+from grafana_migrator.source_dump import (
+    SourceDump,
+    SourceDumpError,
+    parse_alert_rule,
+    parse_contact_point,
+    read_source_dump,
+    write_source_dump,
+)
 
 SEARCH_RESULTS = [
     {"uid": "folder-1", "title": "Team Alerts", "type": "dash-folder"},
@@ -77,3 +84,103 @@ def test_write_source_dump_writes_one_file_per_dashboard(tmp_path):
     assert (tmp_path / "contact-points.json").is_file()
     assert (tmp_path / "notification-policy.json").is_file()
     assert (tmp_path / "meta.json").is_file()
+
+
+# Shaped like a real GET /api/v1/provisioning/alert-rules entry (snake_case
+# notification_settings/keep_firing_for, dashboard link only in annotations).
+REAL_API_ALERT_RULE = {
+    "id": 2,
+    "uid": "UnschedulablePods_id",
+    "orgID": 1,
+    "folderUID": "bfu2bjcz3jugwd",
+    "ruleGroup": "Cluster Autoscaler",
+    "title": "Unschedulable pods",
+    "condition": "C",
+    "data": [{"refId": "A", "datasourceUid": "Prometheus", "model": {}}],
+    "updated": "2024-01-01T00:00:00Z",
+    "noDataState": "OK",
+    "execErrState": "Error",
+    "for": "20m",
+    "keep_firing_for": "0s",
+    "annotations": {
+        "__dashboardUid__": "cluster_autoscaler_overview",
+        "__panelId__": "12",
+        "summary": "unschedulable pods",
+    },
+    "labels": {"severity": "critical"},
+    "provenance": "file",
+    "isPaused": False,
+    "notification_settings": None,
+    "record": None,
+}
+
+
+def testparse_alert_rule_reads_snake_case_fields_not_camel_case():
+    rule = parse_alert_rule(REAL_API_ALERT_RULE)
+    assert rule.keep_firing_for == "0s"
+    assert rule.notification_settings is None
+
+
+def testparse_alert_rule_extracts_dashboard_and_panel_from_annotations():
+    rule = parse_alert_rule(REAL_API_ALERT_RULE)
+    assert rule.dashboard_uid == "cluster_autoscaler_overview"
+    assert rule.panel_id == 12
+    # the raw annotation keys are still preserved for the CR's own annotations
+    assert rule.annotations["__dashboardUid__"] == "cluster_autoscaler_overview"
+
+
+def testparse_alert_rule_without_dashboard_annotations_leaves_them_none():
+    raw = dict(REAL_API_ALERT_RULE)
+    raw["annotations"] = {"summary": "no dashboard link here"}
+    rule = parse_alert_rule(raw)
+    assert rule.dashboard_uid is None
+    assert rule.panel_id is None
+
+
+def testparse_contact_point_reads_secure_field_names_from_secure_fields_map():
+    raw = {
+        "uid": "slack-uid",
+        "name": "Platform Slack",
+        "type": "slack",
+        "settings": {"recipient": "#platform-alerts"},
+        "secureFields": {"url": True},
+        "disableResolveMessage": False,
+    }
+    cp = parse_contact_point(raw)
+    assert cp.secure_field_names == ("url",)
+    assert cp.settings == {"recipient": "#platform-alerts"}
+
+
+def testparse_contact_point_with_no_secure_fields():
+    raw = {"uid": "email-uid", "name": "Platform Email", "type": "email", "settings": {"addresses": "a@b.com"}}
+    cp = parse_contact_point(raw)
+    assert cp.secure_field_names == ()
+
+
+def testparse_contact_point_detects_inline_redacted_sentinel():
+    # Some Grafana versions redact secure fields in-place with "[REDACTED]".
+    raw = {
+        "uid": "slack-uid",
+        "name": "Platform Slack",
+        "type": "slack",
+        "settings": {"recipient": "#platform-alerts", "url": "[REDACTED]"},
+        "disableResolveMessage": False,
+    }
+    cp = parse_contact_point(raw)
+    assert cp.secure_field_names == ("url",)
+    # the sentinel must never end up in settings -- it isn't a real value
+    assert cp.settings == {"recipient": "#platform-alerts"}
+    assert "url" not in cp.settings
+
+
+def testparse_contact_point_merges_secure_fields_map_and_inline_sentinel():
+    raw = {
+        "uid": "webhook-uid",
+        "name": "Platform Webhook",
+        "type": "webhook",
+        "settings": {"url": "https://example.com/hook", "password": "[REDACTED]"},
+        "secureFields": {"authorization_credentials": True},
+    }
+    cp = parse_contact_point(raw)
+    assert cp.secure_field_names == ("authorization_credentials", "password")
+    assert cp.settings == {"url": "https://example.com/hook"}

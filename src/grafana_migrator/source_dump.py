@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .grafana_client import GrafanaClient, GrafanaClientError
+from .models import SourceAlertRule, SourceContactPoint
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,66 @@ class SourceDump:
     alert_rules_raw: Optional[list[dict[str, Any]]]
     contact_points_raw: Optional[list[dict[str, Any]]]
     notification_policy_raw: Optional[dict[str, Any]]
+
+
+def parse_alert_rule(raw: dict[str, Any]) -> SourceAlertRule:
+    """Parse one entry from GET /api/v1/provisioning/alert-rules.
+
+    notification_settings/keep_firing_for are snake_case unlike the rest of
+    the payload; dashboard/panel linkage only exists as __dashboardUid__/
+    __panelId__ annotations, not a top-level field.
+    """
+    annotations = dict(raw.get("annotations") or {})
+    dashboard_uid = annotations.get("__dashboardUid__")
+    panel_id_raw = annotations.get("__panelId__")
+    panel_id = int(panel_id_raw) if panel_id_raw is not None else None
+
+    return SourceAlertRule(
+        uid=raw["uid"],
+        title=raw["title"],
+        rule_group=raw["ruleGroup"],
+        folder_uid=raw["folderUID"],
+        condition=raw["condition"],
+        data=raw.get("data", []),
+        no_data_state=raw.get("noDataState", "NoData"),
+        exec_err_state=raw.get("execErrState", "Alerting"),
+        for_=raw.get("for", "0s"),
+        annotations=annotations,
+        labels=raw.get("labels") or {},
+        is_paused=raw.get("isPaused", False),
+        notification_settings=raw.get("notification_settings"),
+        dashboard_uid=dashboard_uid,
+        panel_id=panel_id,
+        record=raw.get("record"),
+        keep_firing_for=raw.get("keep_firing_for"),
+    )
+
+
+_REDACTED_SENTINEL = "[REDACTED]"
+
+
+def parse_contact_point(raw: dict[str, Any]) -> SourceContactPoint:
+    """Parse one entry from GET /api/v1/provisioning/contact-points.
+
+    Secure fields are marked either via a `secureFields` map or an inline
+    "[REDACTED]" sentinel in `settings`; check both and strip the sentinel
+    out of `settings` so it never lands in a manifest as a real value.
+    """
+    settings = dict(raw.get("settings") or {})
+    secure_fields = {k for k, is_set in (raw.get("secureFields") or {}).items() if is_set}
+    for key, value in list(settings.items()):
+        if value == _REDACTED_SENTINEL:
+            secure_fields.add(key)
+            del settings[key]
+
+    return SourceContactPoint(
+        uid=raw["uid"],
+        name=raw["name"],
+        type=raw["type"],
+        settings=settings,
+        secure_field_names=tuple(sorted(secure_fields)),
+        disable_resolve_message=raw.get("disableResolveMessage", False),
+    )
 
 
 def fetch_source(client: GrafanaClient, *, skip_alerts: bool, skip_notification_policy: bool) -> SourceDump:

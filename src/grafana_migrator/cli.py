@@ -22,29 +22,12 @@ import sys
 from pathlib import Path
 from typing import Any, Optional
 
-from .dedup import AlertRuleIndex, ContactPointIndex, DashboardIndex, FolderIndex
 from .grafana_client import GrafanaClientError, build_client
-from .k8s_inventory import (
-    KubectlError,
-    has_existing_notification_policy,
-    list_existing_alert_rule_groups,
-    list_existing_contact_points,
-    list_existing_dashboards,
-    list_existing_folders,
-)
-from .models import SourceAlertRule, SourceContactPoint, SourceDashboardRef, SourceFolder, SourceNotificationPolicy
-from .naming import alert_rule_group_cr_name, contact_point_cr_name, dashboard_cr_name, folder_cr_name
+from .import_plan import IncompleteSnapshotError, PlanOptions, plan_import
+from .k8s_inventory import KubectlError, build_target_inventory
+from .operator_backend import emit_manifests
 from .report import MigrationReport
 from .source_dump import SourceDumpError, fetch_source, read_source_dump, write_source_dump
-from .transform import (
-    alert_rule_group_to_manifest,
-    contact_point_to_manifest,
-    dashboard_json_to_manifest,
-    folder_title_to_manifest,
-    is_default_contact_point,
-    is_default_notification_policy,
-    notification_policy_to_manifest,
-)
 from .yaml_output import dump_manifest
 
 logger = logging.getLogger("grafana_migrator")
@@ -63,66 +46,6 @@ def parse_selector(raw: str) -> dict[str, str]:
     if not result:
         raise argparse.ArgumentTypeError("--instance-selector must contain at least one key=value pair")
     return result
-
-
-def _parse_alert_rule(raw: dict[str, Any]) -> SourceAlertRule:
-    """Parse one entry from GET /api/v1/provisioning/alert-rules.
-
-    notification_settings/keep_firing_for are snake_case unlike the rest of
-    the payload; dashboard/panel linkage only exists as __dashboardUid__/
-    __panelId__ annotations, not a top-level field.
-    """
-    annotations = dict(raw.get("annotations") or {})
-    dashboard_uid = annotations.get("__dashboardUid__")
-    panel_id_raw = annotations.get("__panelId__")
-    panel_id = int(panel_id_raw) if panel_id_raw is not None else None
-
-    return SourceAlertRule(
-        uid=raw["uid"],
-        title=raw["title"],
-        rule_group=raw["ruleGroup"],
-        folder_uid=raw["folderUID"],
-        condition=raw["condition"],
-        data=raw.get("data", []),
-        no_data_state=raw.get("noDataState", "NoData"),
-        exec_err_state=raw.get("execErrState", "Alerting"),
-        for_=raw.get("for", "0s"),
-        annotations=annotations,
-        labels=raw.get("labels") or {},
-        is_paused=raw.get("isPaused", False),
-        notification_settings=raw.get("notification_settings"),
-        dashboard_uid=dashboard_uid,
-        panel_id=panel_id,
-        record=raw.get("record"),
-        keep_firing_for=raw.get("keep_firing_for"),
-    )
-
-
-_REDACTED_SENTINEL = "[REDACTED]"
-
-
-def _parse_contact_point(raw: dict[str, Any]) -> SourceContactPoint:
-    """Parse one entry from GET /api/v1/provisioning/contact-points.
-
-    Secure fields are marked either via a `secureFields` map or an inline
-    "[REDACTED]" sentinel in `settings`; check both and strip the sentinel
-    out of `settings` so it never lands in a manifest as a real value.
-    """
-    settings = dict(raw.get("settings") or {})
-    secure_fields = {k for k, is_set in (raw.get("secureFields") or {}).items() if is_set}
-    for key, value in list(settings.items()):
-        if value == _REDACTED_SENTINEL:
-            secure_fields.add(key)
-            del settings[key]
-
-    return SourceContactPoint(
-        uid=raw["uid"],
-        name=raw["name"],
-        type=raw["type"],
-        settings=settings,
-        secure_field_names=tuple(sorted(secure_fields)),
-        disable_resolve_message=raw.get("disableResolveMessage", False),
-    )
 
 
 def _manifest_subdirs(manifests: list[tuple[str, dict[str, Any]]]) -> list[str]:
@@ -332,258 +255,39 @@ def run_import(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    report = MigrationReport()
+    opts = PlanOptions(
+        include_title_duplicates=args.include_title_duplicates,
+        skip_alerts=args.skip_alerts,
+        skip_notification_policy=args.skip_notification_policy,
+    )
+
     try:
-        existing_dashboards = list_existing_dashboards(args.namespace, args.kube_context)
-        existing_folders = list_existing_folders(args.namespace, args.kube_context)
+        inventory = build_target_inventory(
+            args.namespace,
+            args.kube_context,
+            # Skipping alerts means never reading the alerting CRDs at all,
+            # rather than reading them and throwing the answer away.
+            include_alerting=not (args.skip_alerts or dump.alert_rules_raw is None),
+        )
+        plan = plan_import(dump, inventory, opts, report)
+    except IncompleteSnapshotError as exc:
+        print(
+            f"error: {args.export_dir} has no dashboards/{exc.uid}.json, but search.json lists it "
+            "-- snapshot looks incomplete or corrupted",
+            file=sys.stderr,
+        )
+        return 1
     except KubectlError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    logger.info(
-        "discovered %d existing GrafanaDashboard(s) and %d existing GrafanaFolder(s) in namespace %s",
-        len(existing_dashboards),
-        len(existing_folders),
-        args.namespace,
+    manifests = emit_manifests(
+        plan,
+        namespace=args.namespace,
+        instance_selector=args.instance_selector,
+        report=report,
     )
-
-    dash_index = DashboardIndex(existing_dashboards)
-    folder_index = FolderIndex(existing_folders)
-
-    source_folders = [
-        SourceFolder(uid=i["uid"], title=i["title"]) for i in dump.search_results if i.get("type") == "dash-folder"
-    ]
-    source_dashboards = [
-        SourceDashboardRef(
-            uid=i["uid"],
-            title=i["title"],
-            folder_uid=i.get("folderUid"),
-            folder_title=i.get("folderTitle") or None,
-        )
-        for i in dump.search_results
-        if i.get("type") == "dash-db"
-    ]
-
-    report = MigrationReport()
-    manifests: list[tuple[str, dict[str, Any]]] = []
-    folder_ref_by_source_uid: dict[str, str] = {}
-
-    for f in source_folders:
-        existing = folder_index.find(f.title)
-        if existing:
-            folder_ref_by_source_uid[f.uid] = existing.cr_name
-            report.folders_reused.append({"title": f.title, "cr_name": existing.cr_name})
-            continue
-        cr_name = folder_cr_name(f.title)
-        folder_ref_by_source_uid[f.uid] = cr_name
-        manifests.append(
-            (
-                f"folders/{cr_name}.yaml",
-                folder_title_to_manifest(
-                    f.title,
-                    name=cr_name,
-                    namespace=args.namespace,
-                    instance_selector=args.instance_selector,
-                    source_uid=f.uid,
-                ),
-            )
-        )
-        report.folders_created.append({"title": f.title, "cr_name": cr_name})
-
-    for d in source_dashboards:
-        decision = dash_index.decide(d.uid, d.title, include_title_duplicates=args.include_title_duplicates)
-        if decision.action == "skip_uid_match":
-            report.skipped_uid_match.append(
-                {"uid": d.uid, "title": d.title, "matched_cr_name": decision.matched_cr_name}
-            )
-            continue
-        if decision.action == "skip_title_match":
-            report.skipped_title_match.append(
-                {"uid": d.uid, "title": d.title, "matched_cr_name": decision.matched_cr_name}
-            )
-            continue
-
-        full = dump.dashboards_by_uid.get(d.uid)
-        if full is None:
-            print(
-                f"error: {args.export_dir} has no dashboards/{d.uid}.json, but search.json lists it "
-                "-- snapshot looks incomplete or corrupted",
-                file=sys.stderr,
-            )
-            return 1
-
-        cr_name = dashboard_cr_name(d.uid)
-        folder_ref = folder_ref_by_source_uid.get(d.folder_uid) if d.folder_uid else None
-        manifests.append(
-            (
-                f"dashboards/{cr_name}.yaml",
-                dashboard_json_to_manifest(
-                    full["dashboard"],
-                    name=cr_name,
-                    namespace=args.namespace,
-                    instance_selector=args.instance_selector,
-                    source_uid=d.uid,
-                    source_title=d.title,
-                    folder_ref=folder_ref,
-                    folder=None if folder_ref else "General",
-                ),
-            )
-        )
-        report.migrated.append({"uid": d.uid, "title": d.title, "cr_name": cr_name})
-
-    skip_alerts = args.skip_alerts or dump.alert_rules_raw is None
-    if not skip_alerts:
-        folder_title_by_uid = {f.uid: f.title for f in source_folders}
-
-        try:
-            existing_rule_groups = list_existing_alert_rule_groups(args.namespace, args.kube_context)
-            existing_contact_points = list_existing_contact_points(args.namespace, args.kube_context)
-        except KubectlError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
-
-        source_rules = [_parse_alert_rule(r) for r in (dump.alert_rules_raw or [])]
-        source_contact_points = [_parse_contact_point(c) for c in (dump.contact_points_raw or [])]
-
-        logger.info(
-            "discovered %d existing GrafanaAlertRuleGroup(s) and %d existing GrafanaContactPoint(s) in namespace %s",
-            len(existing_rule_groups),
-            len(existing_contact_points),
-            args.namespace,
-        )
-
-        rule_index = AlertRuleIndex(existing_rule_groups)
-        rules_to_migrate: dict[tuple[str, str], list[SourceAlertRule]] = {}
-        for rule in source_rules:
-            decision = rule_index.decide(rule.uid, rule.title)
-            if decision.action == "skip_uid_match":
-                report.alert_rules_skipped_uid_match.append(
-                    {"uid": rule.uid, "title": rule.title, "matched_cr_name": decision.matched_cr_name}
-                )
-                continue
-            rules_to_migrate.setdefault((rule.folder_uid, rule.rule_group), []).append(rule)
-
-        for (folder_uid, rule_group), rules in rules_to_migrate.items():
-            folder_title = folder_title_by_uid.get(folder_uid, folder_uid)
-            cr_name = alert_rule_group_cr_name(folder_title, rule_group)
-            folder_ref = folder_ref_by_source_uid.get(folder_uid)
-            manifests.append(
-                (
-                    f"alert-rules/{cr_name}.yaml",
-                    alert_rule_group_to_manifest(
-                        rules,
-                        name=cr_name,
-                        namespace=args.namespace,
-                        instance_selector=args.instance_selector,
-                        rule_group=rule_group,
-                        folder_ref=folder_ref,
-                        folder_uid=None if folder_ref else folder_uid,
-                    ),
-                )
-            )
-            for rule in rules:
-                report.alert_rules_migrated.append(
-                    {"uid": rule.uid, "title": rule.title, "rule_group": rule_group, "cr_name": cr_name}
-                )
-
-        contact_point_index = ContactPointIndex(existing_contact_points)
-        for cp in source_contact_points:
-            if is_default_contact_point(cp):
-                report.contact_points_skipped_default.append({"uid": cp.uid, "name": cp.name})
-                continue
-            decision = contact_point_index.decide(cp.name)
-            if decision.action == "skip_name_match":
-                report.contact_points_skipped_name_match.append(
-                    {"uid": cp.uid, "name": cp.name, "matched_cr_name": decision.matched_cr_name}
-                )
-                continue
-
-            cr_name = contact_point_cr_name(cp.name)
-            secret_name = f"{cr_name}-secrets"
-            manifests.append(
-                (
-                    f"contact-points/{cr_name}.yaml",
-                    contact_point_to_manifest(
-                        cp,
-                        name=cr_name,
-                        namespace=args.namespace,
-                        instance_selector=args.instance_selector,
-                        secret_name=secret_name,
-                    ),
-                )
-            )
-            if cp.secure_field_names:
-                manifests.append(
-                    (
-                        f"contact-points/{secret_name}.yaml",
-                        {
-                            "apiVersion": "v1",
-                            "kind": "Secret",
-                            "metadata": {
-                                "name": secret_name,
-                                "namespace": args.namespace,
-                                "annotations": {
-                                    "grafana-migrator/note": (
-                                        f"placeholder -- populate with the real {cp.type} credentials "
-                                        "before applying the matching GrafanaContactPoint"
-                                    )
-                                },
-                            },
-                            "type": "Opaque",
-                            "stringData": {field_name: "" for field_name in cp.secure_field_names},
-                        },
-                    )
-                )
-            report.contact_points_migrated.append(
-                {
-                    "uid": cp.uid,
-                    "name": cp.name,
-                    "type": cp.type,
-                    "cr_name": cr_name,
-                    "secret_name": secret_name if cp.secure_field_names else None,
-                    "secure_field_names": list(cp.secure_field_names),
-                }
-            )
-
-        skip_notification_policy = args.skip_notification_policy or dump.notification_policy_raw is None
-        if skip_notification_policy:
-            report.notification_policy_status = (
-                "skipped_by_flag" if args.skip_notification_policy else "skipped_unavailable"
-            )
-            report.notification_policy_detail = (
-                "--skip-notification-policy was passed"
-                if args.skip_notification_policy
-                else "the source snapshot has no notification-policy.json (not fetched at export time)"
-            )
-        else:
-            policy = SourceNotificationPolicy(route=dump.notification_policy_raw or {})
-            if is_default_notification_policy(policy):
-                report.notification_policy_status = "skipped_default"
-                report.notification_policy_detail = "source policy is Grafana's untouched default -- nothing to migrate"
-            elif has_existing_notification_policy(args.namespace, args.kube_context):
-                report.notification_policy_status = "skipped_target_has_policy"
-                report.notification_policy_detail = (
-                    "target namespace already has a GrafanaNotificationPolicy CR -- it represents the whole "
-                    "routing tree, so this tool will not risk clobbering it; merge manually if the source "
-                    "policy has routing worth carrying over"
-                )
-            else:
-                cr_name = "migrated-notification-policy"
-                manifests.append(
-                    (
-                        f"notification-policy/{cr_name}.yaml",
-                        notification_policy_to_manifest(
-                            policy,
-                            name=cr_name,
-                            namespace=args.namespace,
-                            instance_selector=args.instance_selector,
-                        ),
-                    )
-                )
-                report.notification_policy_status = "migrated"
-                report.notification_policy_detail = f"-> {cr_name}"
-    else:
-        report.notification_policy_status = "skipped_by_flag"
-        report.notification_policy_detail = "--skip-alerts was passed, or the snapshot has no alert data"
 
     if not args.dry_run:
         out_dir = Path(args.output_dir)

@@ -12,6 +12,7 @@ import logging
 import subprocess
 from typing import Any, Optional
 
+from .import_plan import TargetInventory
 from .models import ExistingAlertRuleGroup, ExistingContactPoint, ExistingDashboard, ExistingFolder
 
 logger = logging.getLogger(__name__)
@@ -115,3 +116,46 @@ def has_existing_notification_policy(namespace: str, context: Optional[str] = No
     """
     data = _kubectl_get_json(_NOTIFICATION_POLICY_CRD, namespace, context)
     return len(data.get("items", [])) > 0
+
+
+def build_target_inventory(
+    namespace: str,
+    context: Optional[str] = None,
+    *,
+    include_alerting: bool,
+) -> TargetInventory:
+    """Read the target cluster into the backend-neutral TargetInventory.
+
+    `include_alerting` is honoured rather than always-on so that --skip-alerts
+    keeps making exactly two kubectl calls instead of four. The notification
+    policy stays behind a callable for the same reason: the planner only needs
+    it when the source policy is non-default.
+    """
+    dashboards = list_existing_dashboards(namespace, context)
+    folders = list_existing_folders(namespace, context)
+    logger.info(
+        "discovered %d existing GrafanaDashboard(s) and %d existing GrafanaFolder(s) in namespace %s",
+        len(dashboards),
+        len(folders),
+        namespace,
+    )
+
+    rule_groups: list[ExistingAlertRuleGroup] = []
+    contact_points: list[ExistingContactPoint] = []
+    if include_alerting:
+        rule_groups = list_existing_alert_rule_groups(namespace, context)
+        contact_points = list_existing_contact_points(namespace, context)
+        logger.info(
+            "discovered %d existing GrafanaAlertRuleGroup(s) and %d existing GrafanaContactPoint(s) in namespace %s",
+            len(rule_groups),
+            len(contact_points),
+            namespace,
+        )
+
+    return TargetInventory(
+        dashboards=dashboards,
+        folders=folders,
+        alert_rule_groups=rule_groups,
+        contact_points=contact_points,
+        probe_notification_policy=lambda: has_existing_notification_policy(namespace, context),
+    )

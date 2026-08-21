@@ -14,9 +14,6 @@ _MATCHER_STRING = re.compile(r'^\s*([^\s!=~]+)\s*(=~|!~|!=|=)\s*(.*)\s*$')
 
 MANAGED_BY_LABEL = {"app.kubernetes.io/managed-by": "grafana-migrator"}
 
-# Grafana's factory-default no-op receiver/policy -- nothing to migrate.
-_DEFAULT_POLICY_RECEIVER = "empty"
-
 
 def dashboard_json_to_manifest(
     dashboard_json: dict[str, Any],
@@ -136,11 +133,6 @@ def alert_rule_group_to_manifest(
     }
 
 
-def is_default_contact_point(cp: SourceContactPoint) -> bool:
-    """Whether this is just Grafana's built-in no-op receiver, not customer config."""
-    return cp.name == _DEFAULT_POLICY_RECEIVER and cp.type == _DEFAULT_POLICY_RECEIVER and not cp.settings
-
-
 def contact_point_to_manifest(
     cp: SourceContactPoint,
     *,
@@ -187,12 +179,6 @@ def contact_point_to_manifest(
             "receivers": [receiver],
         },
     }
-
-
-def is_default_notification_policy(policy: SourceNotificationPolicy) -> bool:
-    """Whether the source's root route is still Grafana's untouched factory default."""
-    route = policy.route
-    return route.get("receiver") == _DEFAULT_POLICY_RECEIVER and not route.get("routes")
 
 
 def _parse_matcher_triple(raw: str) -> list[str]:
