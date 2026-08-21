@@ -78,6 +78,13 @@ class SourceAlertRule:
     record: Optional[dict[str, Any]] = None
     keep_firing_for: Optional[str] = None
 
+    # The verbatim /api/v1/provisioning/alert-rules entry this was parsed from.
+    # The operator path restructures the parsed fields to fit the CRD, but the
+    # HTTP path pushes back to the same endpoint it came from -- replaying the
+    # original payload is both more faithful and immune to Grafana adding
+    # fields this model does not know about.
+    raw: dict[str, Any] = field(default_factory=dict)
+
 
 @dataclass(frozen=True)
 class ExistingAlertRuleGroup:

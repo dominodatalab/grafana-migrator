@@ -78,6 +78,7 @@ def parse_alert_rule(raw: dict[str, Any]) -> SourceAlertRule:
         panel_id=panel_id,
         record=raw.get("record"),
         keep_firing_for=raw.get("keep_firing_for"),
+        raw=dict(raw),
     )
 
 
