@@ -2,10 +2,23 @@
 name = "grafana-migrator"
 version = "0.1.0"
 description = "Export dashboards, folders, alert rules, contact points, and notification policy from a standalone Grafana instance as Grafana Operator custom resources, deduped against the target instance"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "requests>=2.31",
     "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+# black is pinned exactly: its stable style shifts between majors, so an
+# unpinned formatter means "reformat the world" every time someone upgrades.
+# The linters and type checker only get floors -- new rules are worth having.
+dev = [
+    "black==26.3.1",
+    "ruff>=0.14",
+    "mypy>=1.19",
+    "pytest>=8",
+    "types-requests",
+    "types-PyYAML",
 ]
 
 [project.scripts]
@@ -18,14 +31,56 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+grafana_migrator = ["py.typed"]
+
 [tool.black]
 line-length = 120
 skip-string-normalization = true
 
 [tool.ruff]
 line-length = 120
+
+[tool.ruff.lint]
 select = ["E", "F", "I"]
 ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src", "tests"]
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+
+# src/ is the shipped code and carries full annotations already, so it gets the
+# strict treatment. tests/ stay on default checking: annotating 79 test
+# functions with `-> None` buys nothing, and the fixtures deliberately pass
+# loosely-typed literal payloads that mirror real API responses.
+strict = true
+
+# tests/ has no __init__.py (pytest prepend-import mode), so these are
+# top-level module names -- not a `tests.` package. mypy also rejects partial
+# wildcards like `test_*` (a `*` must be a whole component), so the list is
+# explicit; a new test module needs adding here to stay lenient.
+[[tool.mypy.overrides]]
+module = [
+    "fake_session",
+    "test_cli",
+    "test_dedup",
+    "test_grafana_client",
+    "test_naming",
+    "test_run_import",
+    "test_source_dump",
+    "test_transform",
+    "test_yaml_output",
+]
+disallow_untyped_defs = false
+disallow_untyped_calls = false
+disallow_incomplete_defs = false
+disallow_any_generics = false
+disallow_untyped_decorators = false
+warn_return_any = false
+check_untyped_defs = true
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
