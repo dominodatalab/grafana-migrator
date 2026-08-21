@@ -127,9 +127,15 @@ class MigrationReport:
             for m in self.alert_rules_migrated:
                 lines.append(f"  - {m['title']!r} (uid={m['uid']}, group={m['rule_group']!r}) -> {_ref(m)}")
         if self.contact_points_migrated:
-            lines.append("\nMigrated contact points (secrets need populating -- see report detail):")
+            # Only say "needs populating" when something actually does.
+            outstanding = any(m.get("secure_fields_missing") for m in self.contact_points_migrated)
+            suffix = " (secure fields still need values -- see below)" if outstanding else ""
+            lines.append(f"\nMigrated contact points{suffix}:")
             for m in self.contact_points_migrated:
                 secret_note = f", secret={m['secret_name']!r}" if m.get("secure_field_names") else ""
+                still_missing = m.get("secure_fields_missing") or []
+                if still_missing:
+                    secret_note += f" [needs: {', '.join(still_missing)}]"
                 lines.append(f"  - {m['name']!r} (type={m['type']}) -> {_ref(m)}{secret_note}")
         if self.notification_policy_detail:
             lines.append(f"\nNotification policy: {self.notification_policy_detail}")

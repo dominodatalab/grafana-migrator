@@ -27,6 +27,7 @@ from .import_plan import IncompleteSnapshotError, PlanOptions, plan_import
 from .k8s_inventory import KubectlError, build_target_inventory
 from .operator_backend import emit_manifests
 from .report import MigrationReport
+from .secrets_file import SecretsFileError, load_secrets_file, secrets_skeleton, validate_secrets
 from .source_dump import SourceDumpError, fetch_source, read_source_dump, write_source_dump
 from .yaml_output import dump_manifest
 
@@ -236,6 +237,21 @@ def build_import_parser() -> argparse.ArgumentParser:
         "To apply an import later instead, without redoing dedup, use "
         "`grafana-migrator apply <output-dir>`.",
     )
+    p.add_argument(
+        "--secrets-file",
+        default=None,
+        help="YAML/JSON file of {contact point name: {secure field: value}}, supplying the "
+        "credentials Grafana redacts on export. In operator mode these populate the generated "
+        "Secret instead of leaving it blank. Run --write-secrets-skeleton first to get a file "
+        "listing exactly the fields this import needs.",
+    )
+    p.add_argument(
+        "--write-secrets-skeleton",
+        default=None,
+        metavar="PATH",
+        help="Dedup against the target, write a fill-in-the-blanks secrets file covering the "
+        "contact points this import would create, and exit without writing manifests.",
+    )
     p.add_argument("--report-format", choices=["text", "json"], default="text")
     p.add_argument("-v", "--verbose", action="store_true")
     return p
@@ -252,6 +268,12 @@ def run_import(argv: list[str] | None = None) -> int:
     try:
         dump = read_source_dump(Path(args.export_dir))
     except SourceDumpError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        secrets = load_secrets_file(Path(args.secrets_file)) if args.secrets_file else {}
+    except SecretsFileError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
@@ -282,11 +304,25 @@ def run_import(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
+    if args.write_secrets_skeleton:
+        skeleton_path = Path(args.write_secrets_skeleton)
+        skeleton_path.parent.mkdir(parents=True, exist_ok=True)
+        skeleton_path.write_text(secrets_skeleton(plan.contact_points_new))
+        needing = [cp.name for cp in plan.contact_points_new if cp.secure_field_names]
+        print(
+            f"wrote a secrets skeleton for {len(needing)} contact point(s) to {skeleton_path}"
+            + (f" -- fill in: {', '.join(needing)}" if needing else "")
+        )
+        return 0
+
+    report.warnings.extend(validate_secrets(secrets, plan.contact_points_new))
+
     manifests = emit_manifests(
         plan,
         namespace=args.namespace,
         instance_selector=args.instance_selector,
         report=report,
+        secrets=secrets,
     )
 
     if not args.dry_run:

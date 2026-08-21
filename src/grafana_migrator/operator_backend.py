@@ -12,11 +12,12 @@ created or reused.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Mapping, Optional
 
 from .import_plan import ImportPlan
 from .naming import alert_rule_group_cr_name, contact_point_cr_name, dashboard_cr_name, folder_cr_name
 from .report import MigrationReport
+from .secrets_file import secrets_for
 from .transform import (
     alert_rule_group_to_manifest,
     contact_point_to_manifest,
@@ -32,27 +33,36 @@ NOTIFICATION_POLICY_CR_NAME = "migrated-notification-policy"
 Manifest = tuple[str, dict[str, Any]]
 
 
-def _placeholder_secret(secret_name: str, namespace: str, cp_type: str, field_names: tuple[str, ...]) -> dict[str, Any]:
-    """An empty Secret for a contact point's redacted fields.
+def _secret_manifest(
+    secret_name: str,
+    namespace: str,
+    cp_type: str,
+    field_names: tuple[str, ...],
+    supplied: Mapping[str, str],
+) -> dict[str, Any]:
+    """The Secret backing a contact point's redacted fields.
 
     Grafana redacts secure settings on every read, so the real values were
-    never in the snapshot; a human fills this in before applying.
+    never in the snapshot. Anything --secrets-file provided is filled in here;
+    the rest stay empty for a human to complete before applying.
     """
+    missing = [f for f in field_names if not supplied.get(f)]
+    note = (
+        f"placeholder -- populate with the real {cp_type} credentials "
+        "before applying the matching GrafanaContactPoint"
+        if missing
+        else f"populated from --secrets-file for this {cp_type} contact point"
+    )
     return {
         "apiVersion": "v1",
         "kind": "Secret",
         "metadata": {
             "name": secret_name,
             "namespace": namespace,
-            "annotations": {
-                "grafana-migrator/note": (
-                    f"placeholder -- populate with the real {cp_type} credentials "
-                    "before applying the matching GrafanaContactPoint"
-                )
-            },
+            "annotations": {"grafana-migrator/note": note},
         },
         "type": "Opaque",
-        "stringData": {field_name: "" for field_name in field_names},
+        "stringData": {field_name: supplied.get(field_name, "") for field_name in field_names},
     }
 
 
@@ -62,6 +72,7 @@ def emit_manifests(
     namespace: str,
     instance_selector: dict[str, str],
     report: MigrationReport,
+    secrets: Optional[Mapping[str, Mapping[str, str]]] = None,
 ) -> list[Manifest]:
     manifests: list[Manifest] = []
 
@@ -139,6 +150,7 @@ def emit_manifests(
     for cp in plan.contact_points_new:
         cr_name = contact_point_cr_name(cp.name)
         secret_name = f"{cr_name}-secrets"
+        supplied = secrets_for(secrets or {}, cp.name)
         manifests.append(
             (
                 f"contact-points/{cr_name}.yaml",
@@ -155,7 +167,7 @@ def emit_manifests(
             manifests.append(
                 (
                     f"contact-points/{secret_name}.yaml",
-                    _placeholder_secret(secret_name, namespace, cp.type, cp.secure_field_names),
+                    _secret_manifest(secret_name, namespace, cp.type, cp.secure_field_names, supplied),
                 )
             )
         report.contact_points_migrated.append(
@@ -167,6 +179,8 @@ def emit_manifests(
                 "target_ref": cr_name,
                 "secret_name": secret_name if cp.secure_field_names else None,
                 "secure_field_names": list(cp.secure_field_names),
+                "secure_fields_supplied": [f for f in cp.secure_field_names if supplied.get(f)],
+                "secure_fields_missing": [f for f in cp.secure_field_names if not supplied.get(f)],
             }
         )
 

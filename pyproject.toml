@@ -76,6 +76,7 @@ module = [
     "test_import_plan",
     "test_naming",
     "test_report",
+    "test_secrets_file",
     "test_run_import",
     "test_source_dump",
     "test_transform",
