@@ -1,9 +1,9 @@
-import pytest
-import requests
-from requests.adapters import HTTPAdapter
 from typing import cast
 
+import pytest
+import requests
 from fake_session import FakeResponse, FakeSession
+from requests.adapters import HTTPAdapter
 
 from grafana_migrator.grafana_client import (
     GrafanaAuthError,

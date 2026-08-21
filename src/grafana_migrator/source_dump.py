@@ -115,8 +115,7 @@ def read_source_dump(export_dir: Path) -> SourceDump:
     search_path = export_dir / _SEARCH_FILENAME
     if not search_path.is_file():
         raise SourceDumpError(
-            f"{export_dir} doesn't look like a `grafana-migrator export` directory "
-            f"(missing {_SEARCH_FILENAME})"
+            f"{export_dir} doesn't look like a `grafana-migrator export` directory " f"(missing {_SEARCH_FILENAME})"
         )
     search_results = json.loads(search_path.read_text())
 

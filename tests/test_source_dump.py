@@ -1,5 +1,5 @@
-from typing import Any
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -7,7 +7,13 @@ from grafana_migrator.source_dump import SourceDump, SourceDumpError, read_sourc
 
 SEARCH_RESULTS = [
     {"uid": "folder-1", "title": "Team Alerts", "type": "dash-folder"},
-    {"uid": "dash-1", "title": "CPU Overview", "type": "dash-db", "folderUid": "folder-1", "folderTitle": "Team Alerts"},
+    {
+        "uid": "dash-1",
+        "title": "CPU Overview",
+        "type": "dash-db",
+        "folderUid": "folder-1",
+        "folderTitle": "Team Alerts",
+    },
 ]
 DASHBOARD_PAYLOAD = {"dashboard": {"uid": "dash-1", "title": "CPU Overview", "panels": []}, "meta": {"version": 3}}
 

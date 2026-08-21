@@ -77,9 +77,7 @@ def list_existing_folders(namespace: str, context: Optional[str] = None) -> list
     return out
 
 
-def list_existing_alert_rule_groups(
-    namespace: str, context: Optional[str] = None
-) -> list[ExistingAlertRuleGroup]:
+def list_existing_alert_rule_groups(namespace: str, context: Optional[str] = None) -> list[ExistingAlertRuleGroup]:
     data = _kubectl_get_json(_ALERT_RULE_GROUP_CRD, namespace, context)
     out: list[ExistingAlertRuleGroup] = []
     for item in data.get("items", []):

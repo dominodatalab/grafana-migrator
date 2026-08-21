@@ -221,7 +221,9 @@ def _normalize_route(route: dict[str, Any]) -> dict[str, Any]:
     """
     route = dict(route)
     if route.get("matchers"):
-        route["object_matchers"] = [_parse_matcher_triple(m) if isinstance(m, str) else m for m in route.pop("matchers")]
+        route["object_matchers"] = [
+            _parse_matcher_triple(m) if isinstance(m, str) else m for m in route.pop("matchers")
+        ]
     if route.get("routes"):
         route["routes"] = [_normalize_route(r) for r in route["routes"]]
     return route

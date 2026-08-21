@@ -546,7 +546,9 @@ def run_import(argv: list[str] | None = None) -> int:
 
         skip_notification_policy = args.skip_notification_policy or dump.notification_policy_raw is None
         if skip_notification_policy:
-            report.notification_policy_status = "skipped_by_flag" if args.skip_notification_policy else "skipped_unavailable"
+            report.notification_policy_status = (
+                "skipped_by_flag" if args.skip_notification_policy else "skipped_unavailable"
+            )
             report.notification_policy_detail = (
                 "--skip-notification-policy was passed"
                 if args.skip_notification_policy

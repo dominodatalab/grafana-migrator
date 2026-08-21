@@ -45,7 +45,10 @@ CONTACT_POINT = {
     "type": "slack",
     "settings": {"recipient": "#platform", "url": "[REDACTED]"},
 }
-NOTIFICATION_POLICY = {"receiver": "Platform Slack", "routes": [{"receiver": "Platform Slack", "matchers": ["team=platform"]}]}
+NOTIFICATION_POLICY = {
+    "receiver": "Platform Slack",
+    "routes": [{"receiver": "Platform Slack", "matchers": ["team=platform"]}],
+}
 
 
 def _write_dump(tmp_path):

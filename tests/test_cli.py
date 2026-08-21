@@ -1,5 +1,5 @@
-from typing import Any
 from pathlib import Path
+from typing import Any
 
 from grafana_migrator import cli
 from grafana_migrator.cli import _existing_manifest_subdirs, _manifest_subdirs, _parse_alert_rule, _parse_contact_point
