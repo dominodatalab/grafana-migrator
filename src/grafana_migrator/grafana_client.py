@@ -260,6 +260,46 @@ class GrafanaClient:
         """Return the single root alertmanager route tree for this org."""
         return cast(dict[str, Any], self._get("/api/v1/provisioning/policies"))
 
+    # -- writes -----------------------------------------------------------
+    # Bodies are built by api_payloads; these methods only carry them, so
+    # there is exactly one place that knows the wire format.
+
+    def create_folder(self, body: dict[str, Any]) -> Any:
+        """POST /api/folders. 409 if the uid exists, or the title is taken under the same parent."""
+        return self._request("POST", "/api/folders", json_body=body)
+
+    def create_dashboard(self, body: dict[str, Any]) -> Any:
+        """POST /api/dashboards/db.
+
+        Given a longer timeout than the default: a large dashboard is the
+        slowest write this tool makes. 412 is Grafana's "name-exists" or
+        "version-mismatch" precondition failure.
+        """
+        return self._request("POST", "/api/dashboards/db", json_body=body, timeout=max(self.timeout, 60.0))
+
+    def create_alert_rule(self, body: dict[str, Any]) -> Any:
+        """POST /api/v1/provisioning/alert-rules."""
+        return self._request("POST", "/api/v1/provisioning/alert-rules", json_body=body)
+
+    def set_alert_rule_group_interval(self, *, folder_uid: str, rule_group: str, interval_seconds: int) -> Any:
+        """PUT /api/v1/provisioning/folder/{folder_uid}/rule-groups/{rule_group}.
+
+        The group must already exist, so this runs after its rules are created.
+        """
+        return self._request(
+            "PUT",
+            f"/api/v1/provisioning/folder/{folder_uid}/rule-groups/{rule_group}",
+            json_body={"interval": interval_seconds},
+        )
+
+    def create_contact_point(self, body: dict[str, Any]) -> Any:
+        """POST /api/v1/provisioning/contact-points."""
+        return self._request("POST", "/api/v1/provisioning/contact-points", json_body=body)
+
+    def put_notification_policy(self, body: dict[str, Any]) -> Any:
+        """PUT /api/v1/provisioning/policies -- replaces the ENTIRE route tree."""
+        return self._request("PUT", "/api/v1/provisioning/policies", json_body=body)
+
 
 def build_client(
     *,

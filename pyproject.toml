@@ -68,6 +68,7 @@ strict = true
 [[tool.mypy.overrides]]
 module = [
     "fake_session",
+    "test_api_backend",
     "test_api_payloads",
     "test_cli",
     "test_dedup",

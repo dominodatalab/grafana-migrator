@@ -35,8 +35,14 @@ class MigrationReport:
     folders_created: list[dict[str, Any]] = field(default_factory=list)
     folders_reused: list[dict[str, Any]] = field(default_factory=list)
 
+    # api mode: not attempted because something they depend on failed. Kept
+    # separate from the dedup skips so a folder failure cannot be misread as a
+    # title collision.
+    skipped_dependency_failed: list[dict[str, Any]] = field(default_factory=list)
+
     alert_rules_migrated: list[dict[str, Any]] = field(default_factory=list)
     alert_rules_skipped_uid_match: list[dict[str, Any]] = field(default_factory=list)
+    alert_rules_skipped_dependency_failed: list[dict[str, Any]] = field(default_factory=list)
 
     contact_points_migrated: list[dict[str, Any]] = field(default_factory=list)
     contact_points_skipped_name_match: list[dict[str, Any]] = field(default_factory=list)
@@ -57,16 +63,25 @@ class MigrationReport:
             "summary": {
                 "backend": self.backend,
                 "dashboards_discovered": (
-                    len(self.migrated) + len(self.skipped_uid_match) + len(self.skipped_title_match)
+                    len(self.migrated)
+                    + len(self.skipped_uid_match)
+                    + len(self.skipped_title_match)
+                    + len(self.skipped_dependency_failed)
                 ),
                 "dashboards_migrated": len(self.migrated),
                 "dashboards_skipped_uid_match": len(self.skipped_uid_match),
                 "dashboards_skipped_title_match": len(self.skipped_title_match),
+                "dashboards_skipped_dependency_failed": len(self.skipped_dependency_failed),
                 "folders_created": len(self.folders_created),
                 "folders_reused": len(self.folders_reused),
-                "alert_rules_discovered": len(self.alert_rules_migrated) + len(self.alert_rules_skipped_uid_match),
+                "alert_rules_discovered": (
+                    len(self.alert_rules_migrated)
+                    + len(self.alert_rules_skipped_uid_match)
+                    + len(self.alert_rules_skipped_dependency_failed)
+                ),
                 "alert_rules_migrated": len(self.alert_rules_migrated),
                 "alert_rules_skipped_uid_match": len(self.alert_rules_skipped_uid_match),
+                "alert_rules_skipped_dependency_failed": len(self.alert_rules_skipped_dependency_failed),
                 "contact_points_migrated": len(self.contact_points_migrated),
                 "contact_points_skipped_name_match": len(self.contact_points_skipped_name_match),
                 "contact_points_skipped_default": len(self.contact_points_skipped_default),
@@ -77,10 +92,12 @@ class MigrationReport:
             "migrated": self.migrated,
             "skipped_uid_match": self.skipped_uid_match,
             "skipped_title_match": self.skipped_title_match,
+            "skipped_dependency_failed": self.skipped_dependency_failed,
             "folders_created": self.folders_created,
             "folders_reused": self.folders_reused,
             "alert_rules_migrated": self.alert_rules_migrated,
             "alert_rules_skipped_uid_match": self.alert_rules_skipped_uid_match,
+            "alert_rules_skipped_dependency_failed": self.alert_rules_skipped_dependency_failed,
             "contact_points_migrated": self.contact_points_migrated,
             "contact_points_skipped_name_match": self.contact_points_skipped_name_match,
             "contact_points_skipped_default": self.contact_points_skipped_default,
@@ -137,6 +154,12 @@ class MigrationReport:
                 if still_missing:
                     secret_note += f" [needs: {', '.join(still_missing)}]"
                 lines.append(f"  - {m['name']!r} (type={m['type']}) -> {_ref(m)}{secret_note}")
+        if self.skipped_dependency_failed or self.alert_rules_skipped_dependency_failed:
+            lines.append("\nNot attempted (a dependency failed):")
+            for m in self.skipped_dependency_failed:
+                lines.append(f"  - dashboard {m['title']!r}: {m.get('detail', '')}")
+            for m in self.alert_rules_skipped_dependency_failed:
+                lines.append(f"  - alert rule {m['title']!r}: {m.get('detail', '')}")
         if self.notification_policy_detail:
             lines.append(f"\nNotification policy: {self.notification_policy_detail}")
         if self.warnings:
