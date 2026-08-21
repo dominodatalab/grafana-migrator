@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Optional
 
 from .dedup import AlertRuleIndex, ContactPointIndex, DashboardIndex, FolderIndex
-from .grafana_client import GrafanaClient, GrafanaClientError
+from .grafana_client import GrafanaClientError, build_client
 from .k8s_inventory import (
     KubectlError,
     has_existing_notification_policy,
@@ -221,16 +221,14 @@ def run_export(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        if args.source_token:
-            client = GrafanaClient(
-                args.source_url, token=args.source_token, source_path_segment=args.source_path_segment
-            )
-        else:
-            client = GrafanaClient(
-                args.source_url,
-                auth=(args.source_user, args.source_password),
-                source_path_segment=args.source_path_segment,
-            )
+        client = build_client(
+            url=args.source_url,
+            token=args.source_token,
+            user=args.source_user,
+            password=args.source_password,
+            path_segment=args.source_path_segment,
+            flag_prefix="source",
+        )
         dump = fetch_source(
             client, skip_alerts=args.skip_alerts, skip_notification_policy=args.skip_notification_policy
         )
