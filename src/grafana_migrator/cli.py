@@ -4,10 +4,12 @@
   API and writes its raw responses to disk. No target cluster is involved --
   this can run before an operator-managed target instance even exists.
 - `grafana-migrator import` reads a directory `export` wrote, dedups it
-  against the target cluster's existing GrafanaDashboard/GrafanaFolder/...
-  CRs, and writes (optionally applies) GrafanaDashboard/GrafanaFolder/...
-  manifests for whatever is genuinely new. No further dependency on the
-  source instance's reachability or credentials.
+  against whatever the target already has, and writes whatever is genuinely
+  new. `--target operator` (the default) dedups against the target cluster's
+  GrafanaDashboard/GrafanaFolder/... CRs and writes -- optionally applies --
+  CR manifests. `--target api` dedups against a target Grafana's own HTTP API
+  and pushes straight to it, needing no operator and no kubectl. Either way
+  there is no further dependency on the source instance.
 - `grafana-migrator apply <dir>` applies a manifest directory `import`
   already wrote, without redoing discovery or dedup.
 """
@@ -22,9 +24,12 @@ import sys
 from pathlib import Path
 from typing import Any, Optional
 
+from .api_backend import ApiPushOptions, push
 from .grafana_client import GrafanaClientError, build_client
-from .import_plan import IncompleteSnapshotError, PlanOptions, plan_import
-from .k8s_inventory import KubectlError, build_target_inventory
+from .grafana_inventory import build_target_inventory as build_grafana_inventory
+from .import_plan import ImportPlan, IncompleteSnapshotError, PlanOptions, plan_import
+from .k8s_inventory import KubectlError
+from .k8s_inventory import build_target_inventory as build_kubectl_inventory
 from .operator_backend import emit_manifests
 from .report import MigrationReport
 from .secrets_file import SecretsFileError, load_secrets_file, secrets_skeleton, validate_secrets
@@ -194,15 +199,69 @@ def build_import_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument("export_dir", help="Directory previously written by `grafana-migrator export --output-dir ...`")
-    p.add_argument("--namespace", required=True, help="Namespace holding the target Grafana Operator instance")
+    p.add_argument(
+        "--target",
+        choices=["operator", "api"],
+        default="operator",
+        help="Where to write. 'operator' (default) generates Grafana Operator CR manifests and "
+        "dedups against the target cluster via kubectl. 'api' pushes straight to a target "
+        "Grafana's HTTP API and needs no operator or kubectl -- use it for a bare Grafana or "
+        "Grafana Cloud target. See docs/ADVANCED.md for the trade-offs.",
+    )
+    p.add_argument(
+        "--namespace",
+        default=None,
+        help="Namespace holding the target Grafana Operator instance (required with --target operator)",
+    )
     p.add_argument("--kube-context", default=None, help="kubectl context to use (default: current-context)")
     p.add_argument(
         "--instance-selector",
-        required=True,
+        default=None,
         type=parse_selector,
         help="Comma-separated key=value labels used as instanceSelector.matchLabels on every "
         "generated CR -- must match a label actually present on the target Grafana CR "
-        "(e.g. dashboards=my-grafana)",
+        "(e.g. dashboards=my-grafana). Required with --target operator; not used by --target api.",
+    )
+    p.add_argument(
+        "--dest-url",
+        default=os.environ.get("GRAFANA_DEST_URL"),
+        help="Base URL of the target Grafana instance (default: $GRAFANA_DEST_URL). " "Required with --target api.",
+    )
+    p.add_argument(
+        "--dest-path-segment",
+        default=os.environ.get("GRAFANA_DEST_PATH_SEGMENT"),
+        help="Ingress path prefix on the target, if any -- the --source-path-segment equivalent "
+        "(default: $GRAFANA_DEST_PATH_SEGMENT).",
+    )
+    p.add_argument(
+        "--dest-token",
+        default=os.environ.get("GRAFANA_DEST_TOKEN"),
+        help="Target Grafana service account token (default: $GRAFANA_DEST_TOKEN). Needs the "
+        "Admin organization role: a lower role can create dashboards but silently fail on alert "
+        "rules, contact points and the notification policy.",
+    )
+    p.add_argument(
+        "--dest-user",
+        default=os.environ.get("GRAFANA_DEST_USERNAME"),
+        help="Target Grafana admin username (default: $GRAFANA_DEST_USERNAME), used if --dest-token is not given.",
+    )
+    p.add_argument(
+        "--dest-password",
+        default=os.environ.get("GRAFANA_DEST_PASSWORD"),
+        help="Target Grafana admin password (default: $GRAFANA_DEST_PASSWORD).",
+    )
+    p.add_argument(
+        "--editable",
+        action="store_true",
+        help="--target api only: send X-Disable-Provenance so migrated objects stay editable in "
+        "the target's UI. Without it they are marked provisioned and are read-only there, which "
+        "signals that the snapshot remains the source of truth.",
+    )
+    p.add_argument(
+        "--stop-on-first-error",
+        action="store_true",
+        help="--target api only: abort on the first per-object failure instead of pushing what "
+        "can be pushed and reporting the rest. Useful in CI.",
     )
     p.add_argument(
         "--output-dir",
@@ -257,12 +316,58 @@ def build_import_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _validate_import_args(args: argparse.Namespace) -> Optional[str]:
+    """First problem with this flag combination, or None.
+
+    Kept as one function so the whole conditional matrix is testable without
+    argparse, and so --namespace/--instance-selector can be required for one
+    target and meaningless for the other.
+    """
+    if args.apply and args.dry_run:
+        return "--apply cannot be combined with --dry-run"
+
+    if args.target == "operator":
+        if not args.namespace:
+            return "--namespace is required with --target operator"
+        if not args.instance_selector:
+            return "--instance-selector is required with --target operator"
+        return None
+
+    if args.apply:
+        return "--apply applies CR manifests, so it only works with --target operator"
+    # Erroring rather than ignoring: a passed selector that silently did
+    # nothing would read as "my CRs got these labels".
+    if args.namespace or args.instance_selector:
+        return "--namespace/--instance-selector only apply to --target operator"
+    if not args.dest_url:
+        return "--dest-url is required with --target api (or $GRAFANA_DEST_URL)"
+    if not args.dest_token and not (args.dest_user and args.dest_password):
+        return (
+            "target credentials required with --target api (--dest-token / $GRAFANA_DEST_TOKEN, or "
+            "--dest-user/--dest-password / $GRAFANA_DEST_USERNAME/$GRAFANA_DEST_PASSWORD)"
+        )
+    return None
+
+
+def _write_secrets_skeleton(args: argparse.Namespace, plan: ImportPlan) -> int:
+    path = Path(args.write_secrets_skeleton)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(secrets_skeleton(plan.contact_points_new))
+    needing = [cp.name for cp in plan.contact_points_new if cp.secure_field_names]
+    print(
+        f"wrote a secrets skeleton for {len(needing)} contact point(s) to {path}"
+        + (f" -- fill in: {', '.join(needing)}" if needing else "")
+    )
+    return 0
+
+
 def run_import(argv: list[str] | None = None) -> int:
     args = build_import_parser().parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s %(message)s")
 
-    if args.apply and args.dry_run:
-        print("error: --apply cannot be combined with --dry-run", file=sys.stderr)
+    problem = _validate_import_args(args)
+    if problem:
+        print(f"error: {problem}", file=sys.stderr)
         return 2
 
     try:
@@ -277,21 +382,31 @@ def run_import(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    report = MigrationReport(backend="operator")
+    report = MigrationReport(backend=args.target)
     opts = PlanOptions(
         include_title_duplicates=args.include_title_duplicates,
         skip_alerts=args.skip_alerts,
         skip_notification_policy=args.skip_notification_policy,
     )
+    # Skipping alerts means never reading the alerting endpoints at all, rather
+    # than reading them and throwing the answer away.
+    include_alerting = not (args.skip_alerts or dump.alert_rules_raw is None)
 
+    if args.target == "operator":
+        return _run_import_operator(args, dump, opts, include_alerting, secrets, report)
+    return _run_import_api(args, dump, opts, include_alerting, secrets, report)
+
+
+def _run_import_operator(
+    args: argparse.Namespace,
+    dump: Any,
+    opts: PlanOptions,
+    include_alerting: bool,
+    secrets: dict[str, dict[str, str]],
+    report: MigrationReport,
+) -> int:
     try:
-        inventory = build_target_inventory(
-            args.namespace,
-            args.kube_context,
-            # Skipping alerts means never reading the alerting CRDs at all,
-            # rather than reading them and throwing the answer away.
-            include_alerting=not (args.skip_alerts or dump.alert_rules_raw is None),
-        )
+        inventory = build_kubectl_inventory(args.namespace, args.kube_context, include_alerting=include_alerting)
         plan = plan_import(dump, inventory, opts, report)
     except IncompleteSnapshotError as exc:
         print(
@@ -305,18 +420,9 @@ def run_import(argv: list[str] | None = None) -> int:
         return 1
 
     if args.write_secrets_skeleton:
-        skeleton_path = Path(args.write_secrets_skeleton)
-        skeleton_path.parent.mkdir(parents=True, exist_ok=True)
-        skeleton_path.write_text(secrets_skeleton(plan.contact_points_new))
-        needing = [cp.name for cp in plan.contact_points_new if cp.secure_field_names]
-        print(
-            f"wrote a secrets skeleton for {len(needing)} contact point(s) to {skeleton_path}"
-            + (f" -- fill in: {', '.join(needing)}" if needing else "")
-        )
-        return 0
+        return _write_secrets_skeleton(args, plan)
 
     report.warnings.extend(validate_secrets(secrets, plan.contact_points_new))
-
     manifests = emit_manifests(
         plan,
         namespace=args.namespace,
@@ -343,6 +449,72 @@ def run_import(argv: list[str] | None = None) -> int:
             return rc
 
     return 0
+
+
+def _run_import_api(
+    args: argparse.Namespace,
+    dump: Any,
+    opts: PlanOptions,
+    include_alerting: bool,
+    secrets: dict[str, dict[str, str]],
+    report: MigrationReport,
+) -> int:
+    try:
+        client = build_client(
+            url=args.dest_url,
+            token=args.dest_token,
+            user=args.dest_user,
+            password=args.dest_password,
+            path_segment=args.dest_path_segment,
+            flag_prefix="dest",
+            # Set once for the whole run rather than per call site: forgetting
+            # it on one of four provisioning writes would be a silent change in
+            # whether that object is editable.
+            default_headers={"X-Disable-Provenance": "true"} if args.editable else None,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        inventory = build_grafana_inventory(client, include_alerting=include_alerting)
+        plan = plan_import(dump, inventory, opts, report)
+    except IncompleteSnapshotError as exc:
+        print(
+            f"error: {args.export_dir} has no dashboards/{exc.uid}.json, but search.json lists it "
+            "-- snapshot looks incomplete or corrupted",
+            file=sys.stderr,
+        )
+        return 1
+    except GrafanaClientError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if args.write_secrets_skeleton:
+        return _write_secrets_skeleton(args, plan)
+
+    report.warnings.extend(validate_secrets(secrets, plan.contact_points_new))
+    rc = push(
+        plan,
+        client,
+        ApiPushOptions(
+            dry_run=args.dry_run,
+            stop_on_first_error=args.stop_on_first_error,
+            secrets=secrets,
+        ),
+        report,
+    )
+
+    if not args.dry_run:
+        # report.json is the record of what landed, and what to fix before a
+        # re-run. Written even when the push partly failed -- especially then.
+        out_dir = Path(args.output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "report.json").write_text(report.to_json())
+        logger.info("wrote report to %s", out_dir / "report.json")
+
+    print(report.to_json() if args.report_format == "json" else report.to_text())
+    return rc
 
 
 # ---------------------------------------------------------------------------

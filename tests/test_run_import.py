@@ -10,8 +10,9 @@ from __future__ import annotations
 import json
 
 import yaml
+from fake_session import FakeResponse, FakeSession
 
-from grafana_migrator import cli, k8s_inventory
+from grafana_migrator import cli, grafana_client, k8s_inventory
 from grafana_migrator.source_dump import SourceDump, write_source_dump
 
 SEARCH_RESULTS = [
@@ -203,3 +204,158 @@ def test_import_treats_uid_already_on_target_as_skipped_not_migrated(tmp_path, m
         ]
     )
     assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# --target api, end to end through the CLI
+# ---------------------------------------------------------------------------
+
+_API_ROUTES = {
+    ("GET", "/api/search"): FakeResponse(200, []),
+    ("GET", "/api/v1/provisioning/alert-rules"): FakeResponse(200, []),
+    ("GET", "/api/v1/provisioning/contact-points"): FakeResponse(200, []),
+    ("GET", "/api/v1/provisioning/policies"): FakeResponse(200, {"receiver": "empty"}),
+    ("POST", "/api/folders"): FakeResponse(200, {"uid": "folder-1"}),
+    ("POST", "/api/dashboards/db"): FakeResponse(200, {"uid": "dash-1"}),
+    ("POST", "/api/v1/provisioning/alert-rules"): FakeResponse(200, {}),
+    ("POST", "/api/v1/provisioning/contact-points"): FakeResponse(200, {}),
+    ("PUT", "/api/v1/provisioning/policies"): FakeResponse(200, {}),
+}
+
+
+def _mock_api_target(monkeypatch, routes=None):
+    """Capture the session the CLI builds, so calls can be asserted on.
+
+    Wraps grafana_client.build_client rather than cli.build_client: patching
+    twice in one test would otherwise wrap the previous wrapper and keep
+    injecting the first session.
+    """
+    session = FakeSession(dict(routes or _API_ROUTES))
+
+    def build(**kw):
+        kw["session"] = session
+        return grafana_client.build_client(**kw)
+
+    monkeypatch.setattr(cli, "build_client", build)
+    return session
+
+
+def _api_argv(export_dir, tmp_path, *extra):
+    return [
+        str(export_dir),
+        "--target",
+        "api",
+        "--dest-url",
+        "http://graf.test",
+        "--dest-token",
+        "glsa_tok",
+        "--output-dir",
+        str(tmp_path / "api-out"),
+        "--report-format",
+        "json",
+        *extra,
+    ]
+
+
+def test_api_import_pushes_everything_and_writes_only_a_report(tmp_path, monkeypatch, capsys):
+    export_dir = _write_dump(tmp_path)
+    session = _mock_api_target(monkeypatch)
+
+    rc = cli.run_import(_api_argv(export_dir, tmp_path))
+    assert rc == 0
+
+    writes = [(m, p) for m, p, _, _ in session.calls if m != "GET"]
+    assert ("POST", "/api/folders") in writes
+    assert ("POST", "/api/dashboards/db") in writes
+
+    out_dir = tmp_path / "api-out"
+    # api mode writes the report as its resume record, and no manifests
+    assert (out_dir / "report.json").is_file()
+    assert not (out_dir / "dashboards").exists()
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["summary"]["backend"] == "api"
+    assert report["summary"]["dashboards_migrated"] >= 1
+
+
+def test_api_dry_run_issues_no_writes_and_creates_no_output_dir(tmp_path, monkeypatch, capsys):
+    export_dir = _write_dump(tmp_path)
+    session = _mock_api_target(monkeypatch)
+
+    rc = cli.run_import(_api_argv(export_dir, tmp_path, "--dry-run"))
+    assert rc == 0
+    assert [m for m, _, _, _ in session.calls if m != "GET"] == []
+    assert not (tmp_path / "api-out").exists()
+    assert json.loads(capsys.readouterr().out)["summary"]["backend"] == "api"
+
+
+def test_api_import_is_provisioned_by_default_and_editable_on_request(tmp_path, monkeypatch):
+    export_dir = _write_dump(tmp_path)
+
+    session = _mock_api_target(monkeypatch)
+    cli.run_import(_api_argv(export_dir, tmp_path))
+    assert "X-Disable-Provenance" not in session.headers
+
+    session = _mock_api_target(monkeypatch)
+    cli.run_import(_api_argv(export_dir, tmp_path, "--editable"))
+    assert session.headers["X-Disable-Provenance"] == "true"
+
+
+def test_api_import_exits_1_when_an_object_fails(tmp_path, monkeypatch, capsys):
+    export_dir = _write_dump(tmp_path)
+    routes = dict(_API_ROUTES)
+    routes[("POST", "/api/dashboards/db")] = FakeResponse(400, {"message": "bad panel"})
+    _mock_api_target(monkeypatch, routes)
+
+    rc = cli.run_import(_api_argv(export_dir, tmp_path))
+    assert rc == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["summary"]["failures"] >= 1
+    # the report still lands, which is the point of writing it on failure
+    assert (tmp_path / "api-out" / "report.json").is_file()
+
+
+def test_api_import_reports_a_bad_target_url_cleanly(tmp_path, monkeypatch, capsys):
+    export_dir = _write_dump(tmp_path)
+    _mock_api_target(monkeypatch, {("GET", "/api/search"): FakeResponse(401, {"message": "no"})})
+
+    rc = cli.run_import(_api_argv(export_dir, tmp_path))
+    assert rc == 1
+    assert "--dest-token" in capsys.readouterr().err
+
+
+def test_operator_and_api_agree_on_what_is_new(tmp_path, monkeypatch, capsys):
+    """Same snapshot, both backends, empty target: identical migrate counts."""
+    export_dir = _write_dump(tmp_path)
+
+    _mock_empty_target(monkeypatch)
+    assert (
+        cli.run_import(
+            [
+                str(export_dir),
+                "--namespace",
+                "monitoring",
+                "--instance-selector",
+                "dashboards=my-grafana",
+                "--output-dir",
+                str(tmp_path / "op-out"),
+                "--report-format",
+                "json",
+            ]
+        )
+        == 0
+    )
+    operator = json.loads(capsys.readouterr().out)["summary"]
+
+    _mock_api_target(monkeypatch)
+    assert cli.run_import(_api_argv(export_dir, tmp_path)) == 0
+    api = json.loads(capsys.readouterr().out)["summary"]
+
+    for key in (
+        "dashboards_discovered",
+        "dashboards_migrated",
+        "folders_created",
+        "alert_rules_migrated",
+        "contact_points_migrated",
+    ):
+        assert operator[key] == api[key], key
