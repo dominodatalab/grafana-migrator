@@ -1,27 +1,38 @@
 # grafana-migrator
 
 Migrates dashboards, folders, alert rules, contact points, and the
-notification policy from a **standalone Grafana instance** to **Grafana
-Operator** custom resources on a target cluster. Safe to re-run: anything
-that's already on the target is skipped, not duplicated.
+notification policy from a **standalone Grafana instance** to a target
+Grafana. Safe to re-run: anything that's already on the target is skipped,
+not duplicated.
 
 The work happens in two steps: `export` talks only to the source Grafana
-instance over HTTP; `import` talks only to the target cluster via `kubectl`,
-reading the snapshot `export` wrote. Neither step needs the other's
-credentials or reachability at the same time.
+instance over HTTP; `import` talks only to the target, reading the snapshot
+`export` wrote. Neither step needs the other's credentials or reachability
+at the same time. `import` writes to the target one of two ways, chosen with
+`--target`:
+
+- **`operator`** (the default) -- generates Grafana Operator custom
+  resources and applies them via `kubectl`. Needs grafana-operator already
+  installed on the target cluster.
+- **`api`** -- pushes straight to a target Grafana's HTTP API. Needs no
+  operator and no `kubectl` -- use this for a bare Grafana or Grafana Cloud
+  target.
 
 ## Prerequisites
 
 - Python 3.12+.
-- `kubectl` on `PATH`, pointed at the target cluster, with **grafana-operator
-  already installed** there and a `Grafana` custom resource already present
-  in the namespace you're migrating into.
 - A Grafana **service account token** from the source instance. Follow
   [Grafana's service account docs](https://grafana.com/docs/grafana/latest/administration/service-accounts/#service-accounts)
   to create one, and give it the **Admin** organization role -- a lower
   role can silently fail to read alert rules/contact points/the
   notification policy while dashboards still work, which reads as a
   confusing partial migration.
+- For `--target operator` (the default): `kubectl` on `PATH`, pointed at the
+  target cluster, with **grafana-operator already installed** there and a
+  `Grafana` custom resource already present in the namespace you're
+  migrating into.
+- For `--target api`: a service account token from the **target** Grafana,
+  also with the Admin organization role -- no `kubectl` or operator needed.
 
 Data sources are not yet handled by this tool. See
 [docs/LIMITATIONS.md](docs/LIMITATIONS.md) for this and other known gaps.
@@ -95,13 +106,44 @@ That's it for most migrations. Afterward:
   (webhook URLs, API tokens, passwords) via its API, so those manifests ship
   with empty placeholders that won't work until you populate them.
 
+### Quick start: `--target api`
+
+No `kubectl`, no operator -- just a target Grafana reachable over HTTP:
+
+```bash
+# 1. Same export as above
+export GRAFANA_SOURCE_TOKEN='glsa_...'
+grafana-migrator export \
+  --source-url https://grafana.example.com/grafana-classic \
+  --output-dir ./grafana-migrator-source
+
+# 2. Find out what --secrets-file needs, if anything
+export GRAFANA_DEST_TOKEN='glsa_...'
+grafana-migrator import ./grafana-migrator-source --target api \
+  --dest-url https://grafana.example.com/grafana \
+  --write-secrets-skeleton ./secrets.yaml
+
+# 3. Fill in ./secrets.yaml, then push for real
+grafana-migrator import ./grafana-migrator-source --target api \
+  --dest-url https://grafana.example.com/grafana \
+  --secrets-file ./secrets.yaml \
+  --output-dir ./grafana-migrator-import
+```
+
+Migrated objects are marked provisioned (read-only) in the target's UI by
+default, so the snapshot stays the source of truth; pass `--editable` if
+you'd rather they stay editable there. See
+[docs/ADVANCED.md](docs/ADVANCED.md) for the full `--target api` flag
+reference and how it differs operationally from `--target operator`.
+
 ## Advanced usage
 
 The quick start above covers the common path. For everything else —
-reviewing generated manifests by hand before applying, applying to multiple
-target clusters, basic auth instead of a token, ingress path prefixes, the
-full command/flag reference, and exactly what each step does under the
-hood — see [docs/ADVANCED.md](docs/ADVANCED.md).
+choosing between `--target operator` and `--target api`, reviewing generated
+manifests by hand before applying, applying to multiple target clusters,
+basic auth instead of a token, ingress path prefixes, the full command/flag
+reference, and exactly what each step does under the hood — see
+[docs/ADVANCED.md](docs/ADVANCED.md).
 
 For known limitations (unsupported alert rule types, dedup edge cases,
 notification policy caveats, etc.), see

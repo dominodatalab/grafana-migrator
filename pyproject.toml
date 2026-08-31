@@ -1,7 +1,7 @@
 [project]
 name = "grafana-migrator"
 version = "0.1.0"
-description = "Export dashboards, folders, alert rules, contact points, and notification policy from a standalone Grafana instance as Grafana Operator custom resources, deduped against the target instance"
+description = "Migrate dashboards, folders, alert rules, contact points, and notification policy from a standalone Grafana instance to a target Grafana -- as Grafana Operator custom resources or straight over the target's HTTP API -- deduped against whatever the target already has"
 requires-python = ">=3.12"
 dependencies = [
     "requests>=2.31",

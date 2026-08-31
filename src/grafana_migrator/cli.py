@@ -192,10 +192,12 @@ def build_import_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="grafana-migrator import",
         description=(
-            "Dedup a source snapshot written by `grafana-migrator export` against a target "
-            "cluster's existing GrafanaDashboard/GrafanaFolder/... CRs, and write (optionally "
-            "apply) CR manifests for whatever is genuinely new. Never talks to the source "
-            "Grafana instance -- only reads the snapshot directory and the target cluster."
+            "Dedup a source snapshot written by `grafana-migrator export` against whatever the "
+            "target already has, and write whatever is genuinely new. --target operator (the "
+            "default) dedups against the target cluster's GrafanaDashboard/GrafanaFolder/... CRs "
+            "and writes (optionally applies) CR manifests. --target api dedups against a target "
+            "Grafana's own HTTP API and pushes straight to it. Either way, never talks to the "
+            "source Grafana instance."
         ),
     )
     p.add_argument("export_dir", help="Directory previously written by `grafana-migrator export --output-dir ...`")
