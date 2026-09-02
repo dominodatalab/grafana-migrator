@@ -1,60 +1,110 @@
-"""Aggregate and render a summary of what the exporter did and why."""
+"""Aggregate and render a summary of what an import did and why.
+
+One report type serves both backends. Per-item entries carry a neutral
+`target_ref` / `matched_ref` -- the CR name in operator mode, the Grafana uid
+in api mode -- so the renderer does not have to know which backend ran.
+Operator mode also keeps writing the original `cr_name` / `matched_cr_name`
+keys, since report.json is a documented artifact that docs/ADVANCED.md names
+by key and there are reports on disk from earlier runs.
+"""
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from typing import Any
+
+
+def _ref(entry: dict[str, Any]) -> Any:
+    """The thing this entry landed as on the target, whichever backend wrote it."""
+    return entry.get("target_ref") or entry.get("cr_name")
+
+
+def _matched(entry: dict[str, Any]) -> Any:
+    """The pre-existing target object this entry was deduped against."""
+    return entry.get("matched_ref") or entry.get("matched_cr_name")
 
 
 @dataclass
 class MigrationReport:
-    migrated: list[dict] = field(default_factory=list)
-    skipped_uid_match: list[dict] = field(default_factory=list)
-    skipped_title_match: list[dict] = field(default_factory=list)
-    folders_created: list[dict] = field(default_factory=list)
-    folders_reused: list[dict] = field(default_factory=list)
+    backend: str = "operator"  # operator | api
 
-    alert_rules_migrated: list[dict] = field(default_factory=list)
-    alert_rules_skipped_uid_match: list[dict] = field(default_factory=list)
+    migrated: list[dict[str, Any]] = field(default_factory=list)
+    skipped_uid_match: list[dict[str, Any]] = field(default_factory=list)
+    skipped_title_match: list[dict[str, Any]] = field(default_factory=list)
+    folders_created: list[dict[str, Any]] = field(default_factory=list)
+    folders_reused: list[dict[str, Any]] = field(default_factory=list)
 
-    contact_points_migrated: list[dict] = field(default_factory=list)
-    contact_points_skipped_name_match: list[dict] = field(default_factory=list)
-    contact_points_skipped_default: list[dict] = field(default_factory=list)
+    # api mode: not attempted because something they depend on failed. Kept
+    # separate from the dedup skips so a folder failure cannot be misread as a
+    # title collision.
+    skipped_dependency_failed: list[dict[str, Any]] = field(default_factory=list)
 
-    notification_policy_status: str = "not_attempted"  # migrated | skipped_default | skipped_target_has_policy
+    alert_rules_migrated: list[dict[str, Any]] = field(default_factory=list)
+    alert_rules_skipped_uid_match: list[dict[str, Any]] = field(default_factory=list)
+    alert_rules_skipped_dependency_failed: list[dict[str, Any]] = field(default_factory=list)
+
+    contact_points_migrated: list[dict[str, Any]] = field(default_factory=list)
+    contact_points_skipped_name_match: list[dict[str, Any]] = field(default_factory=list)
+    contact_points_skipped_default: list[dict[str, Any]] = field(default_factory=list)
+
+    # not_attempted | migrated | skipped_by_flag | skipped_unavailable | skipped_default
+    # | skipped_target_has_policy | skipped_target_policy_provisioned | failed
+    notification_policy_status: str = "not_attempted"
     notification_policy_detail: str = ""
 
-    def to_dict(self) -> dict:
+    # api mode only: a write that failed, and anything the run wants to warn
+    # about without failing (e.g. a secure field with no supplied value).
+    failures: list[dict[str, Any]] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
         return {
             "summary": {
+                "backend": self.backend,
                 "dashboards_discovered": (
-                    len(self.migrated) + len(self.skipped_uid_match) + len(self.skipped_title_match)
+                    len(self.migrated)
+                    + len(self.skipped_uid_match)
+                    + len(self.skipped_title_match)
+                    + len(self.skipped_dependency_failed)
                 ),
                 "dashboards_migrated": len(self.migrated),
                 "dashboards_skipped_uid_match": len(self.skipped_uid_match),
                 "dashboards_skipped_title_match": len(self.skipped_title_match),
+                "dashboards_skipped_dependency_failed": len(self.skipped_dependency_failed),
                 "folders_created": len(self.folders_created),
                 "folders_reused": len(self.folders_reused),
-                "alert_rules_discovered": len(self.alert_rules_migrated) + len(self.alert_rules_skipped_uid_match),
+                "alert_rules_discovered": (
+                    len(self.alert_rules_migrated)
+                    + len(self.alert_rules_skipped_uid_match)
+                    + len(self.alert_rules_skipped_dependency_failed)
+                ),
                 "alert_rules_migrated": len(self.alert_rules_migrated),
                 "alert_rules_skipped_uid_match": len(self.alert_rules_skipped_uid_match),
+                "alert_rules_skipped_dependency_failed": len(self.alert_rules_skipped_dependency_failed),
                 "contact_points_migrated": len(self.contact_points_migrated),
                 "contact_points_skipped_name_match": len(self.contact_points_skipped_name_match),
                 "contact_points_skipped_default": len(self.contact_points_skipped_default),
                 "notification_policy_status": self.notification_policy_status,
+                "failures": len(self.failures),
+                "warnings": len(self.warnings),
             },
             "migrated": self.migrated,
             "skipped_uid_match": self.skipped_uid_match,
             "skipped_title_match": self.skipped_title_match,
+            "skipped_dependency_failed": self.skipped_dependency_failed,
             "folders_created": self.folders_created,
             "folders_reused": self.folders_reused,
             "alert_rules_migrated": self.alert_rules_migrated,
             "alert_rules_skipped_uid_match": self.alert_rules_skipped_uid_match,
+            "alert_rules_skipped_dependency_failed": self.alert_rules_skipped_dependency_failed,
             "contact_points_migrated": self.contact_points_migrated,
             "contact_points_skipped_name_match": self.contact_points_skipped_name_match,
             "contact_points_skipped_default": self.contact_points_skipped_default,
             "notification_policy_status": self.notification_policy_status,
             "notification_policy_detail": self.notification_policy_detail,
+            "failures": self.failures,
+            "warnings": self.warnings,
         }
 
     def to_json(self) -> str:
@@ -65,8 +115,9 @@ class MigrationReport:
         lines = [
             "grafana-migrator report",
             "================================",
+            f"  backend                         : {s['backend']}",
             f"  dashboards discovered on source : {s['dashboards_discovered']}",
-            f"  migrated (new manifests written): {s['dashboards_migrated']}",
+            f"  migrated                        : {s['dashboards_migrated']}",
             f"  skipped (uid already on target) : {s['dashboards_skipped_uid_match']}",
             f"  skipped (title collision only)  : {s['dashboards_skipped_title_match']}",
             f"  folders created                 : {s['folders_created']}",
@@ -83,20 +134,44 @@ class MigrationReport:
         if self.migrated:
             lines.append("\nMigrated dashboards:")
             for m in self.migrated:
-                lines.append(f"  - {m['title']!r} (uid={m['uid']}) -> {m['cr_name']}")
+                lines.append(f"  - {m['title']!r} (uid={m['uid']}) -> {_ref(m)}")
         if self.skipped_title_match:
             lines.append("\nTitle-collision skips (review manually if unexpected):")
             for m in self.skipped_title_match:
-                lines.append(f"  - {m['title']!r} (uid={m['uid']}) matches {m['matched_cr_name']}")
+                lines.append(f"  - {m['title']!r} (uid={m['uid']}) matches {_matched(m)}")
         if self.alert_rules_migrated:
             lines.append("\nMigrated alert rules:")
             for m in self.alert_rules_migrated:
-                lines.append(f"  - {m['title']!r} (uid={m['uid']}, group={m['rule_group']!r}) -> {m['cr_name']}")
+                lines.append(f"  - {m['title']!r} (uid={m['uid']}, group={m['rule_group']!r}) -> {_ref(m)}")
         if self.contact_points_migrated:
-            lines.append("\nMigrated contact points (secrets need populating -- see report detail):")
+            # Only say "needs populating" when something actually does.
+            outstanding = any(m.get("secure_fields_missing") for m in self.contact_points_migrated)
+            suffix = " (secure fields still need values -- see below)" if outstanding else ""
+            lines.append(f"\nMigrated contact points{suffix}:")
             for m in self.contact_points_migrated:
                 secret_note = f", secret={m['secret_name']!r}" if m.get("secure_field_names") else ""
-                lines.append(f"  - {m['name']!r} (type={m['type']}) -> {m['cr_name']}{secret_note}")
+                still_missing = m.get("secure_fields_missing") or []
+                if still_missing:
+                    secret_note += f" [needs: {', '.join(still_missing)}]"
+                lines.append(f"  - {m['name']!r} (type={m['type']}) -> {_ref(m)}{secret_note}")
+        if self.skipped_dependency_failed or self.alert_rules_skipped_dependency_failed:
+            lines.append("\nNot attempted (a dependency failed):")
+            for m in self.skipped_dependency_failed:
+                lines.append(f"  - dashboard {m['title']!r}: {m.get('detail', '')}")
+            for m in self.alert_rules_skipped_dependency_failed:
+                lines.append(f"  - alert rule {m['title']!r}: {m.get('detail', '')}")
         if self.notification_policy_detail:
             lines.append(f"\nNotification policy: {self.notification_policy_detail}")
+        if self.warnings:
+            lines.append("\nWarnings:")
+            for w in self.warnings:
+                lines.append(f"  - {w}")
+        if self.failures:
+            lines.append("\nFailures:")
+            for f_ in self.failures:
+                identity = f_.get("identity") or {}
+                label = identity.get("name") or identity.get("title") or identity.get("uid") or "?"
+                status = f_.get("status")
+                status_note = f" [{status}]" if status else ""
+                lines.append(f"  - {f_.get('kind', '?')} {label!r}{status_note}: {f_.get('error', '')}")
         return "\n".join(lines)

@@ -10,6 +10,7 @@ dist/
 
 # local scratch: exported snapshots / imported manifests from real clusters
 exports/
+imports/
 grafana-migrator-source/
 grafana-migrator-import/
 

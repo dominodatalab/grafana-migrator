@@ -1,112 +1,15 @@
+import argparse
 from pathlib import Path
+from typing import Any
 
 from grafana_migrator import cli
-from grafana_migrator.cli import _existing_manifest_subdirs, _manifest_subdirs, _parse_alert_rule, _parse_contact_point
-
-# Shaped like a real GET /api/v1/provisioning/alert-rules entry (snake_case
-# notification_settings/keep_firing_for, dashboard link only in annotations).
-REAL_API_ALERT_RULE = {
-    "id": 2,
-    "uid": "UnschedulablePods_id",
-    "orgID": 1,
-    "folderUID": "bfu2bjcz3jugwd",
-    "ruleGroup": "Cluster Autoscaler",
-    "title": "Unschedulable pods",
-    "condition": "C",
-    "data": [{"refId": "A", "datasourceUid": "Prometheus", "model": {}}],
-    "updated": "2024-01-01T00:00:00Z",
-    "noDataState": "OK",
-    "execErrState": "Error",
-    "for": "20m",
-    "keep_firing_for": "0s",
-    "annotations": {
-        "__dashboardUid__": "cluster_autoscaler_overview",
-        "__panelId__": "12",
-        "summary": "unschedulable pods",
-    },
-    "labels": {"severity": "critical"},
-    "provenance": "file",
-    "isPaused": False,
-    "notification_settings": None,
-    "record": None,
-}
-
-
-def test_parse_alert_rule_reads_snake_case_fields_not_camel_case():
-    rule = _parse_alert_rule(REAL_API_ALERT_RULE)
-    assert rule.keep_firing_for == "0s"
-    assert rule.notification_settings is None
-
-
-def test_parse_alert_rule_extracts_dashboard_and_panel_from_annotations():
-    rule = _parse_alert_rule(REAL_API_ALERT_RULE)
-    assert rule.dashboard_uid == "cluster_autoscaler_overview"
-    assert rule.panel_id == 12
-    # the raw annotation keys are still preserved for the CR's own annotations
-    assert rule.annotations["__dashboardUid__"] == "cluster_autoscaler_overview"
-
-
-def test_parse_alert_rule_without_dashboard_annotations_leaves_them_none():
-    raw = dict(REAL_API_ALERT_RULE)
-    raw["annotations"] = {"summary": "no dashboard link here"}
-    rule = _parse_alert_rule(raw)
-    assert rule.dashboard_uid is None
-    assert rule.panel_id is None
-
-
-def test_parse_contact_point_reads_secure_field_names_from_secure_fields_map():
-    raw = {
-        "uid": "slack-uid",
-        "name": "Platform Slack",
-        "type": "slack",
-        "settings": {"recipient": "#platform-alerts"},
-        "secureFields": {"url": True},
-        "disableResolveMessage": False,
-    }
-    cp = _parse_contact_point(raw)
-    assert cp.secure_field_names == ("url",)
-    assert cp.settings == {"recipient": "#platform-alerts"}
-
-
-def test_parse_contact_point_with_no_secure_fields():
-    raw = {"uid": "email-uid", "name": "Platform Email", "type": "email", "settings": {"addresses": "a@b.com"}}
-    cp = _parse_contact_point(raw)
-    assert cp.secure_field_names == ()
-
-
-def test_parse_contact_point_detects_inline_redacted_sentinel():
-    # Some Grafana versions redact secure fields in-place with "[REDACTED]".
-    raw = {
-        "uid": "slack-uid",
-        "name": "Platform Slack",
-        "type": "slack",
-        "settings": {"recipient": "#platform-alerts", "url": "[REDACTED]"},
-        "disableResolveMessage": False,
-    }
-    cp = _parse_contact_point(raw)
-    assert cp.secure_field_names == ("url",)
-    # the sentinel must never end up in settings -- it isn't a real value
-    assert cp.settings == {"recipient": "#platform-alerts"}
-    assert "url" not in cp.settings
-
-
-def test_parse_contact_point_merges_secure_fields_map_and_inline_sentinel():
-    raw = {
-        "uid": "webhook-uid",
-        "name": "Platform Webhook",
-        "type": "webhook",
-        "settings": {"url": "https://example.com/hook", "password": "[REDACTED]"},
-        "secureFields": {"authorization_credentials": True},
-    }
-    cp = _parse_contact_point(raw)
-    assert cp.secure_field_names == ("authorization_credentials", "password")
-    assert cp.settings == {"url": "https://example.com/hook"}
+from grafana_migrator.cli import _existing_manifest_subdirs, _manifest_subdirs, _validate_import_args
 
 
 def test_manifest_subdirs_excludes_report_json():
     # report.json lives directly under --output-dir, not in a subdirectory --
     # it must never end up in the set of dirs handed to `kubectl apply`.
-    manifests = [
+    manifests: list[tuple[str, dict[str, Any]]] = [
         ("dashboards/migrated-a.yaml", {}),
         ("folders/migrated-b.yaml", {}),
         ("alert-rules/migrated-c.yaml", {}),
@@ -119,7 +22,7 @@ def test_manifest_subdirs_empty_when_nothing_written():
 
 
 def test_manifest_subdirs_dedupes_multiple_files_per_directory():
-    manifests = [
+    manifests: list[tuple[str, dict[str, Any]]] = [
         ("contact-points/migrated-a.yaml", {}),
         ("contact-points/migrated-a-secrets.yaml", {}),
     ]
@@ -146,25 +49,35 @@ def test_existing_manifest_subdirs_on_nonexistent_dir_returns_empty():
     assert _existing_manifest_subdirs(Path("/no/such/directory/anywhere")) == []
 
 
+def _recorder(calls, label=None):
+    """Stand-in for a run_* entry point: record the argv it saw, exit 0."""
+
+    def run(argv):
+        calls.append((label, argv) if label else argv)
+        return 0
+
+    return run
+
+
 def test_run_dispatches_apply_subcommand(monkeypatch):
-    calls = []
-    monkeypatch.setattr(cli, "run_apply", lambda argv: calls.append(("apply", argv)) or 0)
-    monkeypatch.setattr(cli, "run_export", lambda argv: calls.append(("export", argv)) or 0)
-    monkeypatch.setattr(cli, "run_import", lambda argv: calls.append(("import", argv)) or 0)
+    calls: list[Any] = []
+    monkeypatch.setattr(cli, "run_apply", _recorder(calls, "apply"))
+    monkeypatch.setattr(cli, "run_export", _recorder(calls, "export"))
+    monkeypatch.setattr(cli, "run_import", _recorder(calls, "import"))
     cli.run(["apply", "./some-import-dir", "--kube-context", "my-ctx"])
     assert calls == [("apply", ["./some-import-dir", "--kube-context", "my-ctx"])]
 
 
 def test_run_dispatches_export_subcommand(monkeypatch):
-    calls = []
-    monkeypatch.setattr(cli, "run_export", lambda argv: calls.append(argv) or 0)
+    calls: list[Any] = []
+    monkeypatch.setattr(cli, "run_export", _recorder(calls))
     cli.run(["export", "--source-url", "http://localhost:18090"])
     assert calls == [["--source-url", "http://localhost:18090"]]
 
 
 def test_run_dispatches_import_subcommand(monkeypatch):
-    calls = []
-    monkeypatch.setattr(cli, "run_import", lambda argv: calls.append(argv) or 0)
+    calls: list[Any] = []
+    monkeypatch.setattr(cli, "run_import", _recorder(calls))
     cli.run(["import", "./some-snapshot-dir", "--namespace", "monitoring"])
     assert calls == [["./some-snapshot-dir", "--namespace", "monitoring"]]
 
@@ -173,3 +86,94 @@ def test_run_requires_a_known_subcommand(capsys):
     assert cli.run([]) == 2
     assert cli.run(["--source-url", "http://localhost:18090"]) == 2
     assert "export" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# --target validation matrix
+# ---------------------------------------------------------------------------
+
+
+def _import_args(**kw):
+    base = dict(
+        export_dir="./snap",
+        target="operator",
+        namespace=None,
+        kube_context=None,
+        instance_selector=None,
+        dest_url=None,
+        dest_path_segment=None,
+        dest_token=None,
+        dest_user=None,
+        dest_password=None,
+        editable=False,
+        stop_on_first_error=False,
+        output_dir="./out",
+        include_title_duplicates=False,
+        skip_alerts=False,
+        skip_notification_policy=False,
+        dry_run=False,
+        apply=False,
+        secrets_file=None,
+        write_secrets_skeleton=None,
+        report_format="text",
+        verbose=False,
+    )
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def test_target_defaults_to_operator():
+    args = cli.build_import_parser().parse_args(["./snap", "--namespace", "ns", "--instance-selector", "a=b"])
+    assert args.target == "operator"
+
+
+def test_operator_target_requires_namespace_and_selector():
+    assert "namespace" in (_validate_import_args(_import_args()) or "")
+    assert "instance-selector" in (_validate_import_args(_import_args(namespace="ns")) or "")
+    assert _validate_import_args(_import_args(namespace="ns", instance_selector={"a": "b"})) is None
+
+
+def test_api_target_requires_a_dest_url():
+    problem = _validate_import_args(_import_args(target="api"))
+    assert "--dest-url" in (problem or "")
+
+
+def test_api_target_requires_credentials():
+    problem = _validate_import_args(_import_args(target="api", dest_url="http://g"))
+    assert "credentials" in (problem or "")
+
+
+def test_api_target_accepts_a_token_or_basic_auth():
+    assert _validate_import_args(_import_args(target="api", dest_url="http://g", dest_token="t")) is None
+    assert (
+        _validate_import_args(_import_args(target="api", dest_url="http://g", dest_user="u", dest_password="p")) is None
+    )
+
+
+def test_api_target_rejects_half_given_basic_auth():
+    problem = _validate_import_args(_import_args(target="api", dest_url="http://g", dest_user="u"))
+    assert "credentials" in (problem or "")
+
+
+def test_api_target_rejects_apply():
+    problem = _validate_import_args(_import_args(target="api", dest_url="http://g", dest_token="t", apply=True))
+    assert "--target operator" in (problem or "")
+
+
+def test_api_target_rejects_cluster_flags_rather_than_ignoring_them():
+    # Silently ignoring a selector would read as "my CRs got these labels".
+    problem = _validate_import_args(_import_args(target="api", dest_url="http://g", dest_token="t", namespace="ns"))
+    assert "only apply to --target operator" in (problem or "")
+
+
+def test_apply_and_dry_run_conflict_regardless_of_target():
+    problem = _validate_import_args(
+        _import_args(namespace="ns", instance_selector={"a": "b"}, apply=True, dry_run=True)
+    )
+    assert "--apply cannot be combined with --dry-run" in (problem or "")
+
+
+def test_validation_problems_exit_2(capsys):
+    rc = cli.run_import(["./snap", "--target", "api"])
+    assert rc == 2
+    assert "--dest-url" in capsys.readouterr().err

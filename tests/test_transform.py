@@ -6,8 +6,6 @@ from grafana_migrator.transform import (
     contact_point_to_manifest,
     dashboard_json_to_manifest,
     folder_title_to_manifest,
-    is_default_contact_point,
-    is_default_notification_policy,
     notification_policy_to_manifest,
 )
 
@@ -173,11 +171,6 @@ SLACK_CONTACT_POINT = SourceContactPoint(
 )
 
 
-def test_is_default_contact_point_detects_grafanas_builtin_receiver():
-    assert is_default_contact_point(DEFAULT_CONTACT_POINT) is True
-    assert is_default_contact_point(SLACK_CONTACT_POINT) is False
-
-
 def test_contact_point_manifest_points_secure_fields_at_a_secret():
     manifest = contact_point_to_manifest(
         SLACK_CONTACT_POINT,
@@ -216,11 +209,6 @@ CUSTOM_POLICY = SourceNotificationPolicy(
         "routes": [{"receiver": "Platform Slack", "matchers": ["severity=critical"]}],
     }
 )
-
-
-def test_is_default_notification_policy_detects_factory_default():
-    assert is_default_notification_policy(DEFAULT_POLICY) is True
-    assert is_default_notification_policy(CUSTOM_POLICY) is False
 
 
 def test_notification_policy_manifest_strips_provenance():

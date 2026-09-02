@@ -10,8 +10,9 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
-from typing import Optional
+from typing import Any, Optional
 
+from .import_plan import POLICY_ABSENT, POLICY_CUSTOM, TargetInventory
 from .models import ExistingAlertRuleGroup, ExistingContactPoint, ExistingDashboard, ExistingFolder
 
 logger = logging.getLogger(__name__)
@@ -27,7 +28,7 @@ class KubectlError(RuntimeError):
     """Raised when `kubectl` itself fails (not found, bad context, RBAC, etc.)."""
 
 
-def _kubectl_get_json(resource: str, namespace: str, context: Optional[str]) -> dict:
+def _kubectl_get_json(resource: str, namespace: str, context: Optional[str]) -> dict[str, Any]:
     cmd = ["kubectl", "get", resource, "-n", namespace, "-o", "json"]
     if context:
         cmd += ["--context", context]
@@ -41,9 +42,10 @@ def _kubectl_get_json(resource: str, namespace: str, context: Optional[str]) -> 
     if proc.returncode != 0:
         raise KubectlError(f"kubectl get {resource} -n {namespace} failed: {proc.stderr.strip()}")
     try:
-        return json.loads(proc.stdout)
+        parsed: dict[str, Any] = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
         raise KubectlError(f"kubectl get {resource} returned non-JSON output: {exc}") from exc
+    return parsed
 
 
 def list_existing_dashboards(namespace: str, context: Optional[str] = None) -> list[ExistingDashboard]:
@@ -76,9 +78,7 @@ def list_existing_folders(namespace: str, context: Optional[str] = None) -> list
     return out
 
 
-def list_existing_alert_rule_groups(
-    namespace: str, context: Optional[str] = None
-) -> list[ExistingAlertRuleGroup]:
+def list_existing_alert_rule_groups(namespace: str, context: Optional[str] = None) -> list[ExistingAlertRuleGroup]:
     data = _kubectl_get_json(_ALERT_RULE_GROUP_CRD, namespace, context)
     out: list[ExistingAlertRuleGroup] = []
     for item in data.get("items", []):
@@ -116,3 +116,50 @@ def has_existing_notification_policy(namespace: str, context: Optional[str] = No
     """
     data = _kubectl_get_json(_NOTIFICATION_POLICY_CRD, namespace, context)
     return len(data.get("items", [])) > 0
+
+
+def build_target_inventory(
+    namespace: str,
+    context: Optional[str] = None,
+    *,
+    include_alerting: bool,
+) -> TargetInventory:
+    """Read the target cluster into the backend-neutral TargetInventory.
+
+    `include_alerting` is honoured rather than always-on so that --skip-alerts
+    keeps making exactly two kubectl calls instead of four. The notification
+    policy stays behind a callable for the same reason: the planner only needs
+    it when the source policy is non-default.
+    """
+    dashboards = list_existing_dashboards(namespace, context)
+    folders = list_existing_folders(namespace, context)
+    logger.info(
+        "discovered %d existing GrafanaDashboard(s) and %d existing GrafanaFolder(s) in namespace %s",
+        len(dashboards),
+        len(folders),
+        namespace,
+    )
+
+    rule_groups: list[ExistingAlertRuleGroup] = []
+    contact_points: list[ExistingContactPoint] = []
+    if include_alerting:
+        rule_groups = list_existing_alert_rule_groups(namespace, context)
+        contact_points = list_existing_contact_points(namespace, context)
+        logger.info(
+            "discovered %d existing GrafanaAlertRuleGroup(s) and %d existing GrafanaContactPoint(s) in namespace %s",
+            len(rule_groups),
+            len(contact_points),
+            namespace,
+        )
+
+    return TargetInventory(
+        dashboards=dashboards,
+        folders=folders,
+        alert_rule_groups=rule_groups,
+        contact_points=contact_points,
+        # kubectl can only see whether a CR exists, not whether the tree it
+        # describes is Grafana's default -- existence alone is the guardrail.
+        probe_notification_policy_state=lambda: (
+            POLICY_CUSTOM if has_existing_notification_policy(namespace, context) else POLICY_ABSENT
+        ),
+    )

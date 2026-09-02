@@ -1,9 +1,10 @@
 # Advanced usage
 
 This covers everything beyond the [README](../README.md) quick start:
-exactly what each step does, the full requirements list, manual manifest
-review, multi-cluster imports, alternate auth, ingress path prefixes, and
-the complete flag/report reference.
+exactly what each step does, choosing between the two import backends, the
+full requirements list, manual manifest review, contact point secrets,
+api-mode ordering and partial failure, multi-cluster imports, alternate
+auth, ingress path prefixes, and the complete flag/report reference.
 
 ## Architecture
 
@@ -12,22 +13,44 @@ The work is split into three independent steps, each with its own command:
 | Command | Talks to | Purpose |
 | --- | --- | --- |
 | `grafana-migrator export` | source Grafana instance only | Fetch raw content, write a snapshot to disk |
-| `grafana-migrator import` | target cluster only | Dedup a snapshot against the target, write (optionally apply) CR manifests |
-| `grafana-migrator apply` | target cluster only | Re-apply a manifest directory `import` already wrote |
+| `grafana-migrator import` | target only -- a cluster (`--target operator`) or a Grafana HTTP API (`--target api`) | Dedup a snapshot against the target, write (optionally apply) CR manifests, or push straight over HTTP |
+| `grafana-migrator apply` | target cluster only | Re-apply a manifest directory `import --target operator` already wrote. Operator mode only -- `--target api` has no manifests to apply, it writes to the target directly |
 
 **No step needs both the source and the target at once.** `export` never
-touches `kubectl` or any cluster -- it can run before an operator-managed
+touches `kubectl`, a cluster, or a target Grafana -- it can run before a
 target instance even exists. `import`/`apply` never touch the source
 Grafana instance's HTTP API or credentials -- once a snapshot exists on
-disk, everything after that is `kubectl`-only. This also means a single
-`export` snapshot is a portable, reusable artifact: run `import` against
-it as many times, or against as many different target clusters, as you
-like, without going back to the source instance.
+disk, everything after that talks only to the target, via `kubectl`
+(`--target operator`) or the target's own HTTP API (`--target api`). This
+also means a single `export` snapshot is a portable, reusable artifact: run
+`import` against it as many times, or against as many different targets, as
+you like, without going back to the source instance.
 
 Works against any Grafana instance reachable over HTTP: a bare install, one
 running behind an ingress path prefix, or one reached via
 `kubectl port-forward`. Nothing here is tied to a particular hosting
 platform.
+
+## Choosing a backend
+
+`import`'s dedup logic (what's genuinely new vs. already on the target) is
+identical either way -- only how the result gets written differs.
+
+| | `--target operator` (default) | `--target api` |
+| --- | --- | --- |
+| Needs | `kubectl` + grafana-operator on the target cluster | A target Grafana service account token |
+| Writes | CR manifests to disk (optionally applies them) | Directly to the target Grafana over HTTP |
+| Dedups against | The target namespace's existing CRs | The target Grafana's own `/api/search` etc. |
+| Secure fields (contact points) | Populate a generated `Secret` by hand, or via `--secrets-file` | Only via `--secrets-file` -- there's no k8s Secret to fall back to |
+| Editability in target UI | Whatever the operator sets | Provisioned/read-only by default; `--editable` opts out |
+| Review before writing | Yes -- inspect manifests, then `import --apply` or `apply` | No -- `import --target api` writes immediately unless `--dry-run` |
+| Partial-failure recovery | Re-run `import`/`apply`; unapplied manifests are just files | Re-run `import`; already-written objects are skipped, not duplicated (see [ordering and partial failure](#ordering-and-partial-failure-target-api-only)) |
+
+Use `operator` if the target already runs grafana-operator -- it fits the
+existing GitOps/review workflow. Use `api` for a target that doesn't run the
+operator at all (a bare Grafana, Grafana Cloud, or a cluster where you have
+a Grafana token but no CRD RBAC), or when you want the push to happen in one
+command with no manifest-review step.
 
 ### `export`: source instance -> raw snapshot
 
@@ -45,7 +68,7 @@ platform.
    summary. No transformation, no dedup, no Kubernetes concepts at all --
    this step doesn't know what a namespace or an `instanceSelector` is.
 
-### `import`: snapshot + target cluster -> CR manifests
+### `import --target operator`: snapshot + target cluster -> CR manifests
 
 1. Reads the snapshot directory `export` wrote.
 2. Reads the target namespace's existing `GrafanaDashboard`/`GrafanaFolder`/
@@ -97,6 +120,35 @@ for alert rule groups, `migrated-<contact-point-name>`), so re-running
 `import` against the same snapshot always produces the same name --
 `kubectl apply` is a no-op update, not a second copy.
 
+### `import --target api`: snapshot + target Grafana -> pushed over HTTP
+
+1. Reads the snapshot directory `export` wrote.
+2. Reads the target Grafana's existing content over its HTTP API
+   (`GET /api/search`, and unless `--skip-alerts`, the provisioning
+   endpoints for alert rules/contact points/the notification policy).
+3. Runs the same dedup decisions as `--target operator` above (uid/title
+   match for dashboards, folder title reuse, rule uid match, contact point
+   name match, notification-policy-already-exists), against the target's
+   own content instead of its CRs. One consequence worth knowing: the
+   target's `/api/search` returns *every* dashboard on it, not just
+   previously-migrated ones, so title-collision skips fire more often here
+   than in operator mode -- `--include-title-duplicates` is commonly
+   needed.
+4. Pushes each new object with a `POST`, in this order: **folders → contact
+   points → dashboards → alert rules → notification policy.** Contact
+   points come before dashboards deliberately -- a bad `--secrets-file`
+   entry surfaces there, before fifty dashboard writes happen. The
+   notification policy is last because Grafana validates that every
+   receiver it references already exists.
+5. Writes `report.json` describing every decision and every write (or
+   failure). Never writes CR manifests -- there's nothing for
+   `grafana-migrator apply` to do with `--target api`.
+
+See [ordering and partial failure](#ordering-and-partial-failure-target-api-only)
+below for what happens when a write fails partway through, and
+[Target Grafana requirements](#target-grafana-requirements-target-api-only)
+for what the target needs.
+
 ### `apply`: re-apply a manifest directory
 
 Scans a directory `import` already wrote for subdirectories containing at
@@ -109,7 +161,7 @@ dedup; never touches the source Grafana instance.
 
 ### Runtime
 
-- Python 3.10 or later.
+- Python 3.12 or later.
 - `requests>=2.31` and `pyyaml>=6.0` (installed automatically, see
   `pyproject.toml`).
 - `kubectl` on `PATH` -- **only needed for `import` and `apply`**, not for
@@ -156,11 +208,14 @@ Nothing here involves Kubernetes at all -- `export` is a pure HTTP client.
   instance needs one `export` run per org, with per-org credentials --
   there is no `--source-org`/org-switching flag.
 
-### For `import`/`apply`: the target cluster
+### For `import --target operator`/`apply`: the target cluster
 
 Nothing here involves the source Grafana instance at all -- `import`/`apply`
 only need `kubectl` access, and `import` additionally needs to know which
-target `Grafana` instance to stamp onto every generated CR.
+target `Grafana` instance to stamp onto every generated CR. This section is
+specific to `--target operator`; see
+[Target Grafana requirements (--target api only)](#target-grafana-requirements-target-api-only)
+below for the other backend.
 
 - **grafana-operator must already be installed** on the target cluster,
   with its CRDs present: `grafanadashboards`, `grafanafolders`,
@@ -195,7 +250,35 @@ target `Grafana` instance to stamp onto every generated CR.
   content becomes ambiguous -- pick labels specific enough to select the
   one you mean.
 
-## Reviewing manifests by hand before applying
+### Target Grafana requirements (`--target api` only)
+
+Nothing here involves `kubectl`, a cluster, or the source Grafana instance
+-- `import --target api` only needs network reachability to, and
+credentials for, the target Grafana's HTTP API.
+
+- **Credentials, preferably a target Grafana service account token**
+  (`--dest-token` / `$GRAFANA_DEST_TOKEN`) with the **Admin** organization
+  role -- a lower role can create dashboards but silently fail on alert
+  rules, contact points and the notification policy, the same
+  confusing-partial-migration trap as on the source side. See
+  [Grafana's service account docs](https://grafana.com/docs/grafana/latest/administration/service-accounts/#service-accounts).
+  `--dest-user`/`--dest-password` (basic auth) works as a fallback, subject
+  to the same admin-password gotcha described in
+  [docs/LIMITATIONS.md](LIMITATIONS.md#authentication).
+- Network reachability from wherever you run this tool to the target
+  instance's HTTP(S) API -- same considerations as the source instance (see
+  [Ingress path prefix](#ingress-path-prefix)); `--dest-path-segment` is the
+  target-side equivalent of `--source-path-segment`.
+- No RBAC, no CRDs, no `Grafana` custom resource, no `--instance-selector`
+  -- none of that applies to this backend. Passing `--namespace` or
+  `--instance-selector` together with `--target api` is an error, not a
+  silent no-op, since a selector that did nothing would misleadingly read
+  as "my objects got these labels."
+
+## Reviewing manifests by hand before applying (`--target operator` only)
+
+`--target api` has no equivalent step -- it writes straight to the target,
+so there's nothing on disk to review first beyond `--dry-run`'s report.
 
 Instead of `import --apply`, drop `--apply` (and `--dry-run`) to write
 manifests without applying them:
@@ -229,6 +312,93 @@ apply it:
 grafana-migrator apply ./grafana-migrator-manifests
 ```
 
+## Supplying contact point secrets with `--secrets-file`
+
+Grafana's provisioning API redacts secure fields (webhook URLs, API
+tokens, passwords) on every read, so a migrated contact point never carries
+its real credentials -- regardless of backend, the values have to come
+from somewhere at import time.
+
+```bash
+# 1. Find out exactly what's needed: dedups against the target and writes
+#    a fill-in-the-blanks file covering only the contact points this
+#    import would actually create, then exits without writing anything else
+grafana-migrator import ./grafana-migrator-source --target api \
+  --dest-url https://grafana.example.com/grafana \
+  --write-secrets-skeleton ./secrets.yaml
+
+# 2. Fill in ./secrets.yaml, then pass it to the real import
+grafana-migrator import ./grafana-migrator-source --target api \
+  --dest-url https://grafana.example.com/grafana \
+  --secrets-file ./secrets.yaml
+```
+
+`--secrets-file` takes YAML or JSON keyed by contact point name, matched
+the same normalized way dedup matches names (so `Critical PagerDuty` and
+`critical pagerduty` are the same receiver):
+
+```yaml
+"Critical PagerDuty":
+  integrationKey: "..."
+"Team Slack Webhook":
+  url: "..."
+```
+
+An entry naming a contact point that isn't being imported, or a field that
+contact point's type doesn't have, becomes a `report.json` warning rather
+than a silent no-op -- typos here are otherwise invisible, since the import
+still succeeds and the integration is just quietly dead.
+
+Works with both backends. In `--target operator` mode, supplied values
+populate the generated `Secret`'s `stringData` instead of leaving it blank
+(the manual edit-the-Secret step above is still available for anything
+`--secrets-file` doesn't cover). In `--target api` mode this is the *only*
+way to supply real values -- there's no k8s Secret to fall back to editing.
+Either way, an unsupplied secure field is omitted from the write rather than
+sent as an empty string -- Grafana rejects, or in some integration types
+silently wipes, an empty secure field -- and `report.json`'s
+`contact_points_migrated` entries name exactly which fields were supplied
+and which are still missing.
+
+## Ordering and partial failure (`--target api` only)
+
+Unlike `--target operator`, which only ever writes local files (`--apply`
+aside), `--target api` makes real HTTP writes against the target as it
+goes, so what happens mid-run and what happens if one write fails both
+matter.
+
+**Write order:** folders → contact points → dashboards → alert rules →
+notification policy. Contact points deliberately precede dashboards, so a
+bad `--secrets-file` entry is caught before fifty dashboard writes happen
+rather than after. The notification policy is last because Grafana
+validates that every receiver its route tree references already exists.
+
+**Per-object error handling:**
+
+| Response | Behavior |
+| --- | --- |
+| `409`/`412` (already exists) | Not a failure -- recorded as a skip, same as dedup would have said with a fresher read of the target. Never retried with `overwrite=True`. |
+| `400`/`422`/`404` | That object fails, recorded in `report.json`'s `failures`; the run continues with the next object. Exit code is `1`. |
+| `401`/`403` | The whole run aborts immediately -- twenty more identical auth failures would just be noise. |
+| Transport error / `5xx` | The whole run aborts -- a target that's unreachable or unhealthy won't be fixed by hammering it. |
+
+**Dependency failures are explicit, never silent.** If a folder's write
+fails, every dashboard and alert rule that targets it is recorded in
+`report.json`'s `skipped_dependency_failed` / `alert_rules_skipped_dependency_failed`
+lists and not attempted -- never relocated to Grafana's default "General"
+folder, since silently moving migrated content is worse than not migrating
+it.
+
+**Resuming after a partial failure:** just re-run the same `import`
+command. `report.json` is always written, even when the run only got
+partway through, precisely so it's there to consult. Idempotency comes from
+preserved uids -- a re-run's target-content read finds the objects the
+previous run already created and skips them (as `409`/`412`), so a resumed
+run is safe even though there's no transaction or rollback across the two
+runs. There's no dry-run-then-atomically-apply step like `--apply` gives
+`--target operator` -- `--dry-run` only proves the plan, not that every
+write will succeed (a `403` discovered only on write is still possible).
+
 ## Basic auth instead of a token
 
 ```bash
@@ -245,6 +415,10 @@ deployment's `GF_SECURITY_ADMIN_USER` setting or the pod's startup logs.
 See also the admin-password gotcha in
 [docs/LIMITATIONS.md](LIMITATIONS.md#authentication).
 
+Everything above applies equally to `import --target api` with
+`--dest-user`/`--dest-password`/`$GRAFANA_DEST_USERNAME`/`$GRAFANA_DEST_PASSWORD`
+in place of the `--source-*` set.
+
 ## Ingress path prefix
 
 If the source instance sits behind an ingress path prefix rather than at
@@ -257,11 +431,15 @@ This only applies to real hostnames; `localhost`/`127.0.0.1` URLs (i.e.
 port-forward hits the Service's root path directly with no ingress prefix
 to add.
 
+The target side of `import --target api` works identically via
+`--dest-path-segment` / `$GRAFANA_DEST_PATH_SEGMENT`.
+
 ## Capturing a snapshot before a target exists
 
-Because `export` never touches `kubectl` or a target cluster, it's safe to
-run at any point in a migration timeline -- including well before an
-operator-managed instance has been stood up. A common sequence:
+Because `export` never touches `kubectl`, a cluster, or a target Grafana,
+it's safe to run at any point in a migration timeline -- including well
+before the target instance has been stood up. A common sequence
+(`--target api` works the same way, once a target Grafana exists):
 
 ```bash
 # today, while only the legacy/standalone instance exists:
@@ -319,9 +497,9 @@ content.
 
 | Command | Purpose |
 | --- | --- |
-| `grafana-migrator export ...` | Fetch from a source Grafana instance, write a raw snapshot. No target cluster involved. |
-| `grafana-migrator import <snapshot-dir> ...` | Dedup a snapshot against a target cluster, write (optionally apply) CR manifests + report |
-| `grafana-migrator apply <manifest-dir>` | Re-apply a manifest directory `import` already wrote, without redoing discovery or dedup |
+| `grafana-migrator export ...` | Fetch from a source Grafana instance, write a raw snapshot. No target involved. |
+| `grafana-migrator import <snapshot-dir> ...` | Dedup a snapshot against the target, and write (optionally apply) CR manifests (`--target operator`, the default) or push straight to it over HTTP (`--target api`) + report either way |
+| `grafana-migrator apply <manifest-dir>` | Re-apply a manifest directory `import --target operator` already wrote, without redoing discovery or dedup. Nothing to apply for `--target api`. |
 
 A bare `grafana-migrator` invocation with no subcommand (or an unrecognized
 one) prints usage and exits 2 -- there is no default subcommand, since
@@ -348,26 +526,56 @@ if neither is given.
 
 ## `import` flag reference
 
-| Flag | Default | Purpose |
-| --- | --- | --- |
-| `export_dir` (positional) | *(required)* | Directory previously written by `grafana-migrator export --output-dir ...` |
-| `--namespace` | *(required)* | Target namespace holding the operator-managed `Grafana` instance |
-| `--kube-context` | current `kubectl` context | Context to read from/write to on the target cluster |
-| `--instance-selector` | *(required)* | Comma-separated `key=value` labels stamped as `instanceSelector.matchLabels` on every generated CR; must match a label actually present on the target `Grafana` CR |
-| `--output-dir` | `./grafana-migrator-import` | Directory to write generated manifests + `report.json` into |
-| `--include-title-duplicates` | off | Migrate title-collision dashboards instead of skipping them |
-| `--skip-alerts` | off | Don't import alert rules or contact points, even if the snapshot has them |
-| `--skip-notification-policy` | off | Don't import the notification policy tree, even if the snapshot has a custom one |
-| `--dry-run` | off | Discover + dedup + print the report; write nothing (mutually exclusive with `--apply`) |
-| `--apply` | off | Write manifests, then immediately run the equivalent of `grafana-migrator apply <output-dir>` (mutually exclusive with `--dry-run`) |
-| `--report-format` | `text` | `text` or `json` |
-| `-v`, `--verbose` | off | Debug logging, including every `kubectl` invocation |
+| Flag | Env var | Default | Purpose |
+| --- | --- | --- | --- |
+| `export_dir` (positional) | -- | *(required)* | Directory previously written by `grafana-migrator export --output-dir ...` |
+| `--target` | -- | `operator` | `operator` or `api` -- which backend writes the target. See [Choosing a backend](#choosing-a-backend). |
+| `--output-dir` | -- | `./grafana-migrator-import` | Directory to write generated manifests (`--target operator` only) + `report.json` into |
+| `--include-title-duplicates` | -- | off | Migrate title-collision dashboards instead of skipping them |
+| `--skip-alerts` | -- | off | Don't import alert rules or contact points, even if the snapshot has them |
+| `--skip-notification-policy` | -- | off | Don't import the notification policy tree, even if the snapshot has a custom one |
+| `--dry-run` | -- | off | Discover + dedup + print the report; write nothing (mutually exclusive with `--apply`) |
+| `--secrets-file` | -- | unset | YAML/JSON file supplying contact point secure field values. See [Supplying contact point secrets](#supplying-contact-point-secrets-with---secrets-file). |
+| `--write-secrets-skeleton PATH` | -- | unset | Dedup against the target, write a fill-in-the-blanks `--secrets-file` covering exactly the contact points this import would create, then exit without writing anything else |
+| `--report-format` | -- | `text` | `text` or `json` |
+| `-v`, `--verbose` | -- | off | Debug logging, including every `kubectl` invocation or HTTP request/response |
+
+**`--target operator` only:**
+
+| Flag | Env var | Default | Purpose |
+| --- | --- | --- | --- |
+| `--namespace` | -- | *(required)* | Target namespace holding the operator-managed `Grafana` instance |
+| `--kube-context` | -- | current `kubectl` context | Context to read from/write to on the target cluster |
+| `--instance-selector` | -- | *(required)* | Comma-separated `key=value` labels stamped as `instanceSelector.matchLabels` on every generated CR; must match a label actually present on the target `Grafana` CR |
+| `--apply` | -- | off | Write manifests, then immediately run the equivalent of `grafana-migrator apply <output-dir>` (mutually exclusive with `--dry-run`) |
+
+**`--target api` only:**
+
+| Flag | Env var | Default | Purpose |
+| --- | --- | --- | --- |
+| `--dest-url` | `GRAFANA_DEST_URL` | *(required)* | Base URL of the target Grafana instance |
+| `--dest-path-segment` | `GRAFANA_DEST_PATH_SEGMENT` | unset | Ingress path prefix to append to `--dest-url` (skipped for localhost URLs) |
+| `--dest-token` | `GRAFANA_DEST_TOKEN` | unset | Service account token; preferred auth method, takes precedence over user/password if both given |
+| `--dest-user` | `GRAFANA_DEST_USERNAME` | unset | Basic-auth username, used only if `--dest-token` isn't set |
+| `--dest-password` | `GRAFANA_DEST_PASSWORD` | unset | Basic-auth password; prefer the env var so it doesn't land in shell history/process list |
+| `--editable` | -- | off | Send `X-Disable-Provenance`, so migrated objects stay editable in the target's UI. Without it they're provisioned/read-only there. |
+| `--stop-on-first-error` | -- | off | Abort on the first per-object write failure instead of pushing what can be pushed and reporting the rest. Useful in CI. |
+
+Passing `--namespace`, `--instance-selector`, or `--apply` with `--target
+api` is an error -- `import` exits 2 with a message naming the mismatch,
+rather than silently ignoring the flag. (A `--dest-*` flag passed with
+`--target operator` is simply ignored, since that direction has no
+equivalent ambiguity to guard against.)
 
 If the snapshot was captured with `--skip-alerts`/`--skip-notification-policy`
 at export time, `import` treats those categories as absent regardless of
 its own flags -- there's nothing to import that was never fetched.
 
 ## `apply` flag reference
+
+Only relevant to manifests written by `import --target operator` -- there's
+nothing for `apply` to do with `--target api`, which writes to the target
+directly.
 
 | Flag | Default | Purpose |
 | --- | --- | --- |
@@ -390,16 +598,43 @@ what the source instance returned before any transformation happens.
 ## `report.json` fields (`import`'s output)
 
 The report (also printed as text unless `--report-format json`) records
-every decision made, keyed by resource type:
-`migrated` / `skipped_uid_match` / `skipped_title_match` for dashboards,
+every decision made, keyed by resource type, the same way for both
+backends:
+`migrated` / `skipped_uid_match` / `skipped_title_match` /
+`skipped_dependency_failed` for dashboards,
 `folders_created` / `folders_reused`,
-`alert_rules_migrated` / `alert_rules_skipped_uid_match`,
-`contact_points_migrated` (each entry names its companion secret, if any)
+`alert_rules_migrated` / `alert_rules_skipped_uid_match` /
+`alert_rules_skipped_dependency_failed`,
+`contact_points_migrated` (each entry names its companion secret, if any,
+and lists `secure_fields_supplied` / `secure_fields_missing`)
 / `contact_points_skipped_name_match` / `contact_points_skipped_default`,
 and `notification_policy_status` / `notification_policy_detail` (one of
 `migrated`, `skipped_default`, `skipped_target_has_policy`,
-`skipped_unavailable`, or `skipped_by_flag`, with `_detail` explaining
-which and why). Check this file (or the equivalent text report) whenever
-migrated/skipped counts look surprising -- every limitation in
+`skipped_target_policy_provisioned`, `skipped_unavailable`,
+`skipped_by_flag`, or `failed`, with `_detail` explaining which and why).
+Check this file (or the equivalent text report) whenever migrated/skipped
+counts look surprising -- every limitation in
 [docs/LIMITATIONS.md](LIMITATIONS.md) that affects dedup behavior shows up
 here first.
+
+A top-level `backend` field says which backend wrote the report
+(`"operator"` or `"api"`). Every migrated/reused entry carries a
+`target_ref` naming what it landed as on the target -- the CR name in
+operator mode, the Grafana uid in api mode -- and every skip entry carries
+a `matched_ref` naming what it matched against. Operator mode also keeps
+writing the original `cr_name`/`matched_cr_name` keys alongside these,
+unchanged, so anything already parsing `report.json` for those keys keeps
+working.
+
+`--target api` only: a top-level `failures` list, one entry per object
+whose write actually failed (never populated by a 409/412 skip), and a
+`warnings` list -- currently only `--secrets-file` entries that don't match
+any contact point being imported, or name a field that contact point's
+type doesn't have. `skipped_dependency_failed` /
+`alert_rules_skipped_dependency_failed` are specific to this backend too
+(operator mode has nothing that can fail mid-run for another object to
+depend on) -- see
+[Ordering and partial failure](#ordering-and-partial-failure-target-api-only).
+`secret_name` on `contact_points_migrated` entries is always `null` in this
+backend, since there's no k8s Secret to name (in operator mode it's `null`
+too, but only for a contact point with no secure fields at all).

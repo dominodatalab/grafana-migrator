@@ -51,9 +51,7 @@ def test_normalize_title_folds_case_and_whitespace():
 
 
 def test_alert_rule_group_cr_name_is_deterministic_and_keyed_on_folder_and_group():
-    assert alert_rule_group_cr_name("Team Managed", "RabbitMQ") == alert_rule_group_cr_name(
-        "Team Managed", "RabbitMQ"
-    )
+    assert alert_rule_group_cr_name("Team Managed", "RabbitMQ") == alert_rule_group_cr_name("Team Managed", "RabbitMQ")
     assert alert_rule_group_cr_name("Team Managed", "RabbitMQ") == "migrated-team-managed-rabbitmq"
 
 
